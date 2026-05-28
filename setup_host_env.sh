@@ -1,7 +1,7 @@
 #!/bin/bash
 
 echo "========================================"
-echo "🚀 初始化 AGVS4RTL 宿主机 Python 运行环境"
+echo "🚀 初始化 ICU-MUJICA 宿主机 Python 运行环境"
 echo "========================================"
 
 VENV_DIR=".venv"
@@ -54,6 +54,4 @@ echo "========================================"
 echo "🎉 宿主机环境配置完成！"
 echo "👉 请在终端执行以下命令激活环境："
 echo "    source $VENV_DIR/bin/activate"
-echo "▶️ 随后您可以直接运行测试脚本："
-echo "    python test_host_workflow.py"
 echo "========================================"

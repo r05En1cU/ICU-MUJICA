@@ -4,26 +4,28 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.parser
-    image: agvs4rtl-parser
-    container_name: agvs4rtl_parser
+    image: icu-mujica-parser
+    container_name: icu-mujica_parser
     user: "${USER_ID}:${GROUP_ID}"
     environment:
-      - PYTHONPATH=/app
+      - PYTHONPATH=/ICU-MUJICA
       - GEN_SERVICE_URL=http://gen:8000
       - VERIFY_SERVICE_URL=http://verify:8000
-      - AGVS4RTL_LLM_ENABLED=${AGVS4RTL_LLM_ENABLED:-false}
-      - AGVS4RTL_LLM_BASE_URL=${AGVS4RTL_LLM_BASE_URL:-}
-      - AGVS4RTL_LLM_API_KEY=${AGVS4RTL_LLM_API_KEY:-}
-      - AGVS4RTL_LLM_MODEL=${AGVS4RTL_LLM_MODEL:-}
-      - AGVS4RTL_LLM_PROFILE=${AGVS4RTL_LLM_PROFILE:-default}
+      - ICU_MUJICA_LLM_ENABLED=${ICU_MUJICA_LLM_ENABLED:-${AGVS4RTL_LLM_ENABLED:-false}}
+      - ICU_MUJICA_LLM_BASE_URL=${ICU_MUJICA_LLM_BASE_URL:-${AGVS4RTL_LLM_BASE_URL:-}}
+      - ICU_MUJICA_LLM_API_KEY=${ICU_MUJICA_LLM_API_KEY:-${AGVS4RTL_LLM_API_KEY:-}}
+      - ICU_MUJICA_LLM_MODEL=${ICU_MUJICA_LLM_MODEL:-${AGVS4RTL_LLM_MODEL:-}}
+      - ICU_MUJICA_LLM_PROFILE=${ICU_MUJICA_LLM_PROFILE:-${AGVS4RTL_LLM_PROFILE:-default}}
+      - ICU_MUJICA_LLM_REASONING_EFFORT=${ICU_MUJICA_LLM_REASONING_EFFORT:-${AGVS4RTL_LLM_REASONING_EFFORT:-}}
       - GEN_SERVICE_TIMEOUT_SECONDS=${GEN_SERVICE_TIMEOUT_SECONDS:-420}
+      - VERIFY_SERVICE_TIMEOUT_SECONDS=${VERIFY_SERVICE_TIMEOUT_SECONDS:-420}
     ports:
       - "8001:8000"
     command: python -m uvicorn src.parser.main:app --host 0.0.0.0 --port 8000
     volumes:
-      - ./src:/app/src
-      - ./shared_workspace:/app/shared_workspace:rw
-      - ./Output:/app/Output:rw
+      - ./src:/ICU-MUJICA/src
+      - ./shared_workspace:/ICU-MUJICA/shared_workspace:rw
+      - ./output:/ICU-MUJICA/output:rw
     depends_on:
       - gen
       - verify
@@ -33,34 +35,34 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.gen
-    image: agvs4rtl-gen
-    container_name: agvs4rtl_gen
+    image: icu-mujica-gen
+    container_name: icu-mujica_gen
     user: "${USER_ID}:${GROUP_ID}"
     environment:
-      - PYTHONPATH=/app
+      - PYTHONPATH=/ICU-MUJICA
     expose:
       - "8000"
     command: python -m uvicorn src.generator.main:app --host 0.0.0.0 --port 8000
     volumes:
-      - ./src:/app/src
-      - ./shared_workspace:/app/shared_workspace:rw
-      - ./Output:/app/Output:rw
+      - ./src:/ICU-MUJICA/src
+      - ./shared_workspace:/ICU-MUJICA/shared_workspace:rw
+      - ./output:/ICU-MUJICA/output:rw
 
   # Verify Agent: 自动化验证内部服务（仅容器内可见）
   verify:
     build:
       context: .
       dockerfile: docker/Dockerfile.verify
-    image: agvs4rtl-verify
-    container_name: agvs4rtl_verify
+    image: icu-mujica-verify
+    container_name: icu-mujica_verify
     user: "${USER_ID}:${GROUP_ID}"
     environment:
-      - PYTHONPATH=/app
+      - PYTHONPATH=/ICU-MUJICA
       - VERIFY_ENABLE_IVERILOG=true
     expose:
       - "8000"
     command: python -m uvicorn src.verify.main:app --host 0.0.0.0 --port 8000
     volumes:
-      - ./src:/app/src
-      - ./shared_workspace:/app/shared_workspace:rw
-      - ./Output:/app/Output:rw
+      - ./src:/ICU-MUJICA/src
+      - ./shared_workspace:/ICU-MUJICA/shared_workspace:rw
+      - ./output:/ICU-MUJICA/output:rw

@@ -39,7 +39,7 @@ class WorkflowState(TypedDict):
     gen_output: Optional[GenNodeOutput]  # Generator 输出
 
     task_paths: Optional[TaskPaths]  # 当前任务的统一目录布局
-    user_task_spec_path: Optional[str]  # Output 目录中的 UserTaskSpec 路径
+    user_task_spec_path: Optional[str]  # output 目录中的 UserTaskSpec 路径
     origin_input_path: Optional[str]  # 原始输入文件落盘路径
 
     final_stage: str  # 最终停留阶段
@@ -91,12 +91,12 @@ def _ensure_task_directories(task_paths: TaskPaths) -> None:
     创建任务运行所需目录。
 
     目录包括：
-    - Output/TASK_ID/Origin
-    - Output/TASK_ID/Archive
-    - Output/TASK_ID/Result
-    - SharedWorkspace/TASK_ID/specs
-    - SharedWorkspace/TASK_ID/rtl
-    - SharedWorkspace/TASK_ID/sim
+    - output/TASK_ID/Origin
+    - output/TASK_ID/Archive
+    - output/TASK_ID/Result
+    - shared_workspace/TASK_ID/specs
+    - shared_workspace/TASK_ID/rtl
+    - shared_workspace/TASK_ID/sim
     """
     for path_str in [
         task_paths.origin_dir,
@@ -115,10 +115,10 @@ def parser_initialize_node(state: WorkflowState) -> Dict[str, Any]:
 
     职责：
     1. 生成 task_id；
-    2. 创建 Output 与 SharedWorkspace 下的任务目录；
+    2. 创建 output 与 shared_workspace 下的任务目录；
     3. 将原始输入落盘到 Origin；
     4. 进行意图路由，构造 UserTaskSpec；
-    5. 将 UserTaskSpec 分别落盘到 Output 与 SharedWorkspace/specs；
+    5. 将 UserTaskSpec 分别落盘到 output 与 shared_workspace/specs；
     6. 构造 WorkTaskPayload，供 Generator 使用。
     """
     request = state["request"]
@@ -132,7 +132,7 @@ def parser_initialize_node(state: WorkflowState) -> Dict[str, Any]:
     )
     _ensure_task_directories(task_paths)
 
-    # 原始输入落盘到 Output/TASK_ID/Origin
+    # 原始输入落盘到 output/TASK_ID/Origin
     origin_input_path = Path(task_paths.origin_dir) / request.input_filename
     origin_input_path.write_text(request.raw_input_text or "", encoding="utf-8")
 
@@ -154,7 +154,7 @@ def parser_initialize_node(state: WorkflowState) -> Dict[str, Any]:
         design_rules=[],
     )
 
-    # 落盘一份到 Output 根目录，便于人工查看与审计
+    # 落盘一份到 output 根目录，便于人工查看与审计
     output_user_task_spec_path = Path(task_paths.user_task_spec_path)
     output_user_task_spec_path.write_text(
         user_task_spec.model_dump_json(indent=2),
@@ -250,7 +250,7 @@ def archive_success_node(state: WorkflowState) -> Dict[str, Any]:
     当前最小闭环模式下，不等待 Verify，Generator 成功即视为本阶段成功。
 
     职责：
-    1. 将 SharedWorkspace/TASK_ID 下的所有产物复制到 Output/TASK_ID/Result/shared_workspace；
+    1. 将 shared_workspace/TASK_ID 下的所有产物复制到 output/TASK_ID/Result/shared_workspace；
     2. 复制完成后删除 SharedWorkspace/TASK_ID，实现空间回收；
     3. 记录归档成功轨迹。
     """

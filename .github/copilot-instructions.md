@@ -11,7 +11,7 @@
 	- Parser service: `src/parser`
 	- Generator service: `src/generator`
 	- Verify service: `src/verify`
-- Shared artifacts flow through `shared_workspace/` (`specs/`, `rtl/`, `sim/`) mounted into all containers.
+- Shared artifacts flow through `shared_workspace/` (`specs/`, `rtl/`, `sim/`) mounted under `/ICU-MUJICA` in all containers; archived results land in lowercase `output/`.
 - `src/common/models.py` is the contract layer for cross-node data; treat it as the source of truth for payload structure.
 - The repository is in a transition state from Celery/Redis to FastAPI/LangGraph; prefer current FastAPI-oriented patterns in Docker files and compose config.
 
@@ -27,7 +27,7 @@
 - If implementing API entrypoints, ensure compose targets exist (`src.parser.main`, `src.generator.main`, `src.verify.main`).
 
 ## Conventions
-- Keep generated/derived artifacts under `shared_workspace/`; do not hardcode output paths outside this tree.
+- Keep intermediate artifacts under `shared_workspace/` and archived outputs under lowercase `output/`; do not hardcode paths outside `/ICU-MUJICA` inside containers.
 - Preserve container user mapping assumptions in `docker-compose.yml` (`USER_ID` / `GROUP_ID`) to avoid permission regressions.
 - Prefer lightweight interfaces and dependencies for new code; avoid introducing heavy infrastructure libraries (for example Celery/Redis) unless explicitly required.
 - Avoid introducing new Celery/Redis dependencies unless explicitly requested; current container setup installs FastAPI/uvicorn/httpx.

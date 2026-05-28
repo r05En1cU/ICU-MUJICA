@@ -1,40 +1,3 @@
-# 2026-05-29 v1
-
-- 完成项目文档品牌迁移：将项目描述更新为 `IC Unified - Multi-agent Unified Joint IC Automation`，明确 ICU-MUJICA 继承自 AGVS4RTL，曾作为重构分支，现转入独立开发；保留旧 README 备份 `README.md.bak`。
-- 增强 LLM 运行时配置：主环境变量与内部请求头迁移为 `ICU_MUJICA_LLM_*` / `X-ICU-MUJICA-LLM-*`，保留 `AGVS4RTL_*` 兼容回退；补充 `reasoning_effort` 透传、网络重试与 CoT/推理文本剥离，避免运行时敏感配置写入任务产物。
-- 收紧生成失败语义：Generator 真实 LLM 路径取消 dummy fallback，Architect / Coder 失败会记录修复上下文与错误产物，由 Parser / Verify 明确暴露失败，不再静默产出假 PASS。
-- 完成 Verilog-2001 约束收敛：协议、提示词与 Verify 解析均禁止 SystemVerilog `logic` 等新语法，端口类型限定为 `wire` / `reg`，避免生成不可被当前工具链稳定处理的 RTL。
-- 强化 `SpecReg` 图结构校验：禁止 `TOP` 作为普通 `nodes` 节点；层次化设计存在节点时必须提供 `edges`；TOP 边端口必须匹配顶层端口方向；每个子节点必须与 TOP 具备可达与反向可达关系，避免接口契约只藏在自然语言 `implementation_hint` 中。
-- 引入 graph-driven skeleton elaboration：Generator 根据 `SpecReg.edges` 推导子模块端口契约、内部连线与顶层实例化，顶层 RTL skeleton 由图确定性生成；顶层文件不再交给 LLM 自由猜测端口连接，子模块输出端口默认使用 `output reg` 以兼容过程赋值。
-- 增强 Architect 提示词约束：要求层次化/模块化设计必须把子模块接口写入 graph edges，不能仅在说明文本中描述；明确低位宽计算单元组合、模块复用等结构性需求需要体现在节点和边中。
-- Parser / Compose 超时配置补齐：Parser 调用 Generator 与 Verify 的默认超时统一提升到 420 秒，并通过 `GEN_SERVICE_TIMEOUT_SECONDS` / `VERIFY_SERVICE_TIMEOUT_SECONDS` 注入 Compose，降低真实 LLM 与 Verify 慢路径误超时概率。
-- 新增 Gradio 控制台 `app/gradio_ui.py`：支持 Parser 健康检查、工作流提交、实时轮询进度、Artifact/RTL/SpecReg/VerifyRpt/HardwareGraph 预览、Mermaid 图渲染、LLM runtime 表单，以及已归档任务状态刷新。
-- Gradio 控制台新增未完成任务面板：动态扫描 `shared_workspace/TASK_*` 与未归档 `output/TASK_*`，不额外落盘任务索引；支持刷新、检查、加载原始请求到表单、直接重试和删除残留任务目录。
-- 完成本轮容器与 GUI 验证：重建并重启 `parser` / `gen` / `verify` 三服务，确认 Parser health 正常；重启 Gradio GUI 至 `127.0.0.1:7860`，通过浏览器验证未完成任务列表、Load For Retry、删除测试任务与 Refresh Latest Output 可用。
-- 现场评估混合位宽 PE 生成结果：普通提示词可得到可编译扁平 MAC，但缺少低位单元组合结构；强化提示词后模型开始尝试 2-bit 基础乘法与 shift-add 组合，并推导 17-bit 累加结果，但仍暴露 Verilog function 参数与 graph 未层级化问题。当前系统定位为可用的 RTL 生成工作流框架，复杂架构级设计仍需进一步把结构语义硬化到 Architect / Verify 规则中。
-
-# 2026-04-30 v1
-
-- Generator 支持真实 LLM 多文件 Coder 多轮对话：Architect 先规划 `SpecReg.rtl_file_nodes()`，Coder 按计划逐轮生成单个 Verilog module，并通过 `rtl_files` 统一落盘到 `rtl_paths`，供 Verify 作为同一编译单元处理。
-- 增强 Architect LLM 输出归一化：兼容分离的 `clock_and_reset`、`module`/`submodule`/`rtl_file` 节点类型别名、空 `implementation_hint` 和不完整边，降低 schema 偏差导致的 fallback 概率。
-- 修复多文件真实 LLM 路径中的两个解析问题：跳过重复顶层 RTL file node；Verilog module 提取改为匹配真实 `module name (` / `module name #(` 声明，避免把自然语言说明误识别为模块。
-- 协调真实 LLM 多轮生成超时：Parser 默认 Generator 调用超时提升到 420 秒，Compose 注入默认同步为 420 秒，宿主 smoke 客户端超时提升到 540 秒。
-- 验证：`test_llm_multi_file_explicit_workflow.py` 真实 LLM 链路完成 `parser_initialize -> gen_stateless -> verify_stateless -> archive_success`，生成三份 RTL 文件并通过 Verify PASS；smoke 断言改为要求 Architect/Coder transcript，Parser transcript 作为可选分析产物。
-
-# 2026-04-29 v10
-
-- 收紧 `RtlNode` 图节点语义：移除 `is_leaf` 字段与兼容迁移，新增 `is_pure_comb_logic` 表示不可再分的纯组合逻辑，新增 `is_rtl_file` 表示该节点需要计划独立 RTL 文件生成。
-- Generator 的 Architect LLM 提示与 SpecReg 归一化改用 `is_pure_comb_logic` / `is_rtl_file`；顺序逻辑与实例节点不再被错误标记为叶子节点。
-- 多文件落盘入口改为读取 `SpecReg.rtl_file_nodes()`，只有显式 `is_rtl_file=true` 的节点会触发独立 RTL 文件生成路径；多文件验收脚本补充新字段断言并禁止输出旧 `is_leaf`。
-
-# 2026-04-29 v9
-
-- 扩展跨服务协议以兼容多 RTL 文件：`GenNodeOutput` 与 `VerifyTaskPayload` 新增 `rtl_paths`，并保留 `rtl_path` 作为顶层 RTL 主文件路径；`RtlNode` 增补 `file_name`、`instance_name`、`parent_node_id`、`implementation_hint` 等模块化生成元数据。
-- Generator 增加确定性多文件注入路径：当需求包含 `AGVS4RTL_INJECT_MULTI_FILE` 时，生成包含 TOP、control、datapath 实例节点与边的图结构 SpecReg，并落盘顶层、控制、数据通路三个 Verilog 文件。
-- Parser 在调用 Verify 时转发完整 `rtl_paths`，保持旧单文件任务自动归一化兼容。
-- Verify 支持将多个 RTL 文件作为同一编译单元交给 `iverilog`，并在语义检查中确认 SpecReg 子模块声明存在。
-- 新增 `test_multi_file_workflow.py` 宿主机验收脚本，覆盖三文件生成、归档与 Verify PASS 主路径。
-
 # 2026-03-21
 
 - 同步 `pyproject.toml` 依赖到 FastAPI 架构：移除 `celery`、`redis`，新增 `fastapi`、`uvicorn`、`httpx`，并将 `semantic-router` 作为核心依赖。
@@ -48,11 +11,9 @@
 - 依赖管理从 `uv + pyproject.toml` 切换为 `pip + requirements.txt`，同步改造三个 Dockerfile 的安装流程。
   - 删除 `pyproject.toml`；根目录新增 `requirements.txt` 统一声明三服务共用依赖（fastapi/uvicorn/httpx/pydantic/langgraph/semantic-router/pyverilog/cocotb/cocotb-test/pytest）。
   - Dockerfile 由 `COPY --from=ghcr.io/astral-sh/uv` 拉取 uv 改为直接 `pip install --no-cache-dir -r requirements.txt`，移除 `UV_PROJECT_ENVIRONMENT` 环境变量。
-
 # 2026-03-22
 
 - Docker build + 全服务健康检查验证通过：`parser`（8001）对外健康，`gen:8000`、`verify:8000` 容器内网健康；`/health` 端点返回正常，`httpx` 跨容器调用无异常。
-
 # 2026-03-23
 
 - 依赖策略调整：`requirements.txt` 取消所有 `>=` 最低版本约束，改为仅保留包名，安装时默认拉取可解析到的最新版本。
@@ -68,7 +29,6 @@
 - 在 `src/common/models.py` 增补工作流协议模型：`WorkflowRunRequest`、`WorkTaskPayload`、`GenNodeOutput`、`VerifyTaskPayload`、`VerifyNodeOutput`、`WorkflowRunResult`。
 - Docker 内联通冒烟验证通过：调用 `POST /v1/workflow/run` 可返回 `finalize_success`，并包含 Gen/Verify 节点执行轨迹。
 - 备注：容器内 `compileall` 受共享卷 `__pycache__` 写权限影响，已改为“只编译不落盘”语法校验方式完成检查。
-
 # 2026-03-24
 
 - 按 Parser 技术定义重构状态机行为：新增任务冷启动节点，接收请求后立即创建 `/Output/TASK_ID/{Origin,Archive,Result}` 与 `/shared_workspace/TASK_ID/{specs,rtl,sim}` 目录并落盘原始输入。
@@ -79,14 +39,12 @@
 - Parser 编排器支持迭代判定：依据 `VerifyNodeOutput.report.verdict` 决策 PASS 归档、FAIL 重试或失败归档；达到最大轮次后终止。
 - 归档与清理落地：任务结束后将共享工作区产物复制到 `Output/TASK_ID/Result` 或 `Archive`，随后清理 `shared_workspace/TASK_ID`。
 - Docker 联通复验通过：`/v1/workflow/run` 返回 `final_stage=archive_success`，轨迹覆盖 `parser_initialize -> gen_stateless -> verify_stateless -> archive_success`。
-
 # 2026-04-12
 
 - 重构 `SpecReg` 核心数据模型：将其从扁平的实例列表升级为契合硬件特征的有向图结构（Graph Structure），引入 `RtlNode`、`RtlEdge` 和强类型枚举 `NodeType`（包含 `INSTANCE`, `COMBINATIONAL`, `SEQUENTIAL`），以便在多轮对话中渐进式细化模块层级。
 - 为 Gen Agent 引入基于 LangGraph 的内部工作流（`src/generator/workflow.py`），拆分出 `init_context_node`（读取前置规约与验证报错）、`architect_node`（类图节点细化）、`coder_node`（RTL代码生成）以及 `finalize_node`（归档落盘）四个核心节点。
 - 改造 `src/generator/main.py` 的 `/v1/generate` 接口，使其将任务委派给无状态的 LangGraph 工作流实例，确保服务级别的无状态性与图级别的局部状态流转。
 - 完善 `Agent_DEF.md` 中关于 Gen Agent 的技术规范，明确其内部 I/O 网络隔离、共享工作区访问机制以及扮演“架构师+程序员”的双重身份实现多轮对话修复。
-
 # 2026-04-17 v1
 
 - 重构 `src/common/models.py` 协议层：补全 `BaseSyncMeta`、`UserTaskSpec`、`SpecReg`、`VerifyRpt`、`WorkflowRunRequest`、`WorkTaskPayload`、`GenNodeOutput`、`VerifyTaskPayload`、`WorkflowRunResult` 等核心 Pydantic 数据模型；引入 `TaskPaths` 与 `build_task_paths()` 统一任务目录布局，增强多服务间的文件路径契约一致性。
@@ -124,7 +82,6 @@
   - `gen_output.rtl_path`
 
 ---
-
 # 2026-04-17 v2
 
 - 完成 `src/verify/workflow.py` 的 V1 骨架实现，整体风格对齐 `src/generator/workflow.py`，采用 LangGraph 内部状态机组织最小验证流程，当前节点路径为 `init_context -> semantic_check -> compile_check -> finalize`。
@@ -139,7 +96,6 @@
 - 当前系统阶段性状态更新为：`Parser + Generator + Verify Stub V1` 最小生成-验证-归档闭环已可运行，下一阶段将优先补充失败注入测试与 retry 路径验收，再逐步增强 Verify 的静态契约检查粒度与多轮修复闭环能力。
 
 ---
-
 # 2026-04-17 v3
 
 - 完成 Verify Stub V1 接入与联调，恢复 Parser -> Gen -> Verify -> Archive 最小闭环。
@@ -151,7 +107,6 @@
   - FAIL_COMPILE（RTL 语法错误）
   - FAIL_SEMANTIC（顶层端口与 SpecReg 不匹配）
 - 当前系统已具备最小“生成 + 验证 + 归档”闭环能力，为后续 retry 修复闭环与 Verify 动态仿真扩展提供稳定基线。
-
 # 2026-04-29
 
 - 完成 retry 修复闭环的最小验收实现：Parser 已可稳定执行 `parser_initialize -> gen_stateless -> verify_stateless -> prepare_retry -> gen_stateless -> verify_stateless -> archive_success`。
@@ -166,28 +121,24 @@
 - 扩展 `test_host_workflow.py`，覆盖两个宿主机端到端场景：普通 PASS 主路径，以及 `FAIL_SEMANTIC -> retry -> PASS` 修复闭环。
 - 验证结果：使用 `.venv-1/bin/python test_host_workflow.py` 跑通，retry 样例归档到 `Output/TASK_20260429T020447Z_af797796/Result/shared_workspace/`，其中 `VerifyRpt_iter0.json` verdict 为 `FAIL_SEMANTIC`，`VerifyRpt_iter1.json` verdict 为 `PASS`，并保留 `SpecReg_iter0.json`、`SpecReg_iter1.json` 与最终 RTL。
 - 语法检查：宿主机系统 Python 因仓库内既有 `src/**/__pycache__` 权限问题无法直接写入 pyc，已改用 `PYTHONPYCACHEPREFIX=/tmp/agvs4rtl_pycache /usr/bin/python3 -m py_compile ...` 完成关键文件语法编译检查。
-
 # 2026-04-29 v2
 
 - 扩展宿主机端到端验收脚本，新增 `FAIL_COMPILE -> prepare_retry -> PASS` 闭环场景，覆盖 Generator 第 0 轮注入 Verilog 语法错误、Verify 产出 `FAIL_COMPILE`、Parser 路由到 `prepare_retry`、第 1 轮 Generator 恢复正确 RTL 并最终 PASS 的完整路径。
 - 当前 `test_host_workflow.py` 已覆盖三条路径：普通 PASS 主路径、`FAIL_SEMANTIC -> retry -> PASS`、`FAIL_COMPILE -> retry -> PASS`。
 - 验证结果：使用 `.venv-1/bin/python test_host_workflow.py` 跑通，编译失败 retry 样例归档到 `Output/TASK_20260429T022026Z_58f4b115/Result/shared_workspace/`，其中 `VerifyRpt_iter0.json` verdict 为 `FAIL_COMPILE`，`VerifyRpt_iter1.json` verdict 为 `PASS`。
 - 语法检查：继续使用 `PYTHONPYCACHEPREFIX=/tmp/agvs4rtl_pycache /usr/bin/python3 -m py_compile src/common/models.py src/parser/workflow.py src/generator/workflow.py src/verify/workflow.py test_host_workflow.py`，关键 Python 文件均可编译。
-
 # 2026-04-29 v3
 
 - 新增 `INFRA_ERROR -> archive_failed` 非重试路径验收，证明 `VerifyRpt.is_retryable()` 不会把基础设施错误纳入 `prepare_retry` 修复循环。
 - Generator 增加 `AGVS4RTL_INJECT_INFRA_MISSING_RTL_ONCE` 验收钩子：第 0 轮写出 SpecReg 后删除 RTL 文件，使 Verify 在读取 RTL 阶段稳定产出 `INFRA_ERROR`，用于验证 Parser 路由策略。
 - `test_host_workflow.py` 当前覆盖四条宿主机端到端路径：普通 PASS 主路径、`FAIL_SEMANTIC -> retry -> PASS`、`FAIL_COMPILE -> retry -> PASS`、`INFRA_ERROR -> archive_failed`。
 - 验证结果：重启 Generator 服务后使用 `.venv-1/bin/python test_host_workflow.py` 跑通，INFRA 样例归档到 `Output/TASK_20260429T022447Z_7179f99e/Archive/shared_workspace/`，其中 `VerifyRpt_iter0.json` verdict 为 `INFRA_ERROR`，执行轨迹为 `parser_initialize -> gen_stateless -> verify_stateless -> archive_failed`。
-
 # 2026-04-29 v4
 
 - 增强 Verify 静态契约核查：顶层端口解析从“只取端口名”扩展到解析 `direction` 与位宽范围，支持把 `[N:0]` 归一化为实际位宽并与 SpecReg 的 `PortDef.width` 对比。
 - `FAIL_SEMANTIC` 现在可明确报告端口方向错误与端口位宽错误，例如 `port direction mismatch: expected output, actual input`、`port width mismatch: expected 1, actual 2`。
 - Generator 增加 `AGVS4RTL_INJECT_FAIL_PORT_DIRECTION_ONCE` 与 `AGVS4RTL_INJECT_FAIL_PORT_WIDTH_ONCE` 两个验收钩子，用于稳定触发静态契约细节失败并验证 retry 修复路径。
 - `test_host_workflow.py` 扩展为六条宿主机端到端路径：普通 PASS 主路径、`FAIL_SEMANTIC -> retry -> PASS`、`FAIL_COMPILE -> retry -> PASS`、`INFRA_ERROR -> archive_failed`、端口方向 mismatch retry、端口位宽 mismatch retry。
-
 # 2026-04-29 v5
 
 - Parser → Generator 超时支持 `GEN_SERVICE_TIMEOUT_SECONDS` 环境变量，默认 240 秒，适配真实 LLM 生成慢路径。
@@ -198,14 +149,12 @@
 - Generator 在 LLM Coder 路径下同步输出对话记录到 `shared_workspace/TASK_ID/llm/CoderChat_iterN.json`，包含 messages、非敏感请求参数、模型返回内容与 usage 信息；不写入 API key、base URL 或 runtime model。
 - 新增 `.env.example` 与 `.gitignore`，用于本地填写 baseURL/API key，同时避免真实 `.env` 被提交。
 - Architect 节点暂时保持规则化 SpecReg 生成，确保 `SpecReg` 契约稳定；包含 `AGVS4RTL_INJECT_*` 的验收任务继续使用规则 RTL 生成，以保留 retry/静态契约测试钩子。
-
 # 2026-04-29 v6
 
 - 接入 Verify 侧 LLM 诊断增强：Parser 调用 Verify 时同步转发 `X-AGVS4RTL-LLM-*` 运行时请求头，Verify API 解析为 `LlmRuntimeConfig` 后传入内部 LangGraph workflow。
 - Verify workflow 新增 `diagnostic_enhance` 节点，执行路径更新为 `init_context -> semantic_check -> compile_check -> diagnostic_enhance -> finalize`；该节点仅在确定性检查已经产出失败 verdict 且 LLM 启用时运行。
 - Verify LLM 只补充失败报告的修复建议和可读诊断，不决定 `PASS` / `FAIL` / `INFRA_ERROR`；LLM 调用失败时保持原 `VerifyRpt` 不变，并仅记录诊断不可用的 transcript。
 - Verify 诊断对话落盘到 `shared_workspace/TASK_ID/llm/VerifyChat_iterN.json`，归档后随 Parser / Generator 的 LLM transcript 一起进入 `Output/TASK_ID/.../shared_workspace/llm/`；记录不包含 API key、base URL 或 runtime model。
-
 # 2026-04-29 v7
 
 - 同步补充 Parser / Generator LLM 接入说明：README 明确请求体 `llm` 配置优先于 `AGVS4RTL_LLM_*` 环境变量，Parser 负责统一解析运行时配置并通过 `X-AGVS4RTL-LLM-*` 内部请求头转发给 Generator / Verify。
@@ -213,7 +162,6 @@
 - 文档补清 Generator Coder LLM 路径：Generator API 解析 Parser 转发的运行时配置后传入内部 workflow，Coder 节点在启用 LLM 且不含 `AGVS4RTL_INJECT_*` 验收钩子时生成 Verilog；retry 轮次会把上一轮 `SpecReg` 与 `VerifyRpt` 注入提示词。
 - 文档补清 transcript 与安全边界：`ParserChat_iter0.json`、`CoderChat_iterN.json`、`VerifyChat_iterN.json` 均落在 `shared_workspace/TASK_ID/llm/`，记录 messages、非敏感请求参数、响应内容与错误摘要，不持久化 API key、base URL 或 runtime model。
 - 语法检查：使用 `PYTHONPYCACHEPREFIX=/tmp/agvs4rtl_pycache /usr/bin/python3 -m py_compile src/common/models.py src/parser/workflow.py src/generator/workflow.py src/verify/workflow.py src/parser/main.py src/generator/main.py src/verify/main.py test_host_workflow.py` 通过。导入级烟测暂未执行，当前宿主机系统 Python 与工作区 `.venv` 均缺少 `pydantic` 等运行依赖。
-
 # 2026-04-29 v8
 
 - 按阶段产物契约收敛 Generator / Verify 职责：Parser 维护 `UserTaskSpec`，Generator Architect 维护 `SpecReg`，Generator Coder 依据 `SpecReg` 生成 RTL，Verify 维护 `VerifyRpt` 并驱动回溯建议。
@@ -227,3 +175,36 @@
 - 验证结果：`py_compile` 通过关键 Python 文件；`test_verify_only_faults.py` 通过 pass/missing_port/direction_mismatch/width_mismatch/extra_port/compile_error；`.venv-1/bin/python test_host_workflow.py` 通过规则路径全闭环。
 - ALU live smoke：`TASK_20260429T064209Z_288ff077` 通过 Parser -> Gen -> Verify -> archive_success。Architect `SpecReg_iter0.json` 已生成真实 ALU 端口 `a/b/op/result/zero`，无 clock/reset/done dummy；Coder RTL 与端口契约一致，VerifyRpt 为 `PASS`。
 - 新增 `test_fuzzy_requirement_workflow.py`：覆盖“仅输入模糊自然语言、不提供精确端口/opcode 列表”的 LLM smoke，断言 Parser / Architect transcript 落盘、`UserTaskSpec` 保留 8 位约束、`SpecReg` 推导出 8 位输入输出且未回退到默认 `i_clk/i_rst_n/o_done` dummy 契约。
+# 2026-04-29 v9
+
+- 扩展跨服务协议以兼容多 RTL 文件：`GenNodeOutput` 与 `VerifyTaskPayload` 新增 `rtl_paths`，并保留 `rtl_path` 作为顶层 RTL 主文件路径；`RtlNode` 增补 `file_name`、`instance_name`、`parent_node_id`、`implementation_hint` 等模块化生成元数据。
+- Generator 增加确定性多文件注入路径：当需求包含 `AGVS4RTL_INJECT_MULTI_FILE` 时，生成包含 TOP、control、datapath 实例节点与边的图结构 SpecReg，并落盘顶层、控制、数据通路三个 Verilog 文件。
+- Parser 在调用 Verify 时转发完整 `rtl_paths`，保持旧单文件任务自动归一化兼容。
+- Verify 支持将多个 RTL 文件作为同一编译单元交给 `iverilog`，并在语义检查中确认 SpecReg 子模块声明存在。
+- 新增 `test_multi_file_workflow.py` 宿主机验收脚本，覆盖三文件生成、归档与 Verify PASS 主路径。
+# 2026-04-29 v10
+
+- 收紧 `RtlNode` 图节点语义：移除 `is_leaf` 字段与兼容迁移，新增 `is_pure_comb_logic` 表示不可再分的纯组合逻辑，新增 `is_rtl_file` 表示该节点需要计划独立 RTL 文件生成。
+- Generator 的 Architect LLM 提示与 SpecReg 归一化改用 `is_pure_comb_logic` / `is_rtl_file`；顺序逻辑与实例节点不再被错误标记为叶子节点。
+- 多文件落盘入口改为读取 `SpecReg.rtl_file_nodes()`，只有显式 `is_rtl_file=true` 的节点会触发独立 RTL 文件生成路径；多文件验收脚本补充新字段断言并禁止输出旧 `is_leaf`。
+# 2026-04-30 v1
+
+- Generator 支持真实 LLM 多文件 Coder 多轮对话：Architect 先规划 `SpecReg.rtl_file_nodes()`，Coder 按计划逐轮生成单个 Verilog module，并通过 `rtl_files` 统一落盘到 `rtl_paths`，供 Verify 作为同一编译单元处理。
+- 增强 Architect LLM 输出归一化：兼容分离的 `clock_and_reset`、`module`/`submodule`/`rtl_file` 节点类型别名、空 `implementation_hint` 和不完整边，降低 schema 偏差导致的 fallback 概率。
+- 修复多文件真实 LLM 路径中的两个解析问题：跳过重复顶层 RTL file node；Verilog module 提取改为匹配真实 `module name (` / `module name #(` 声明，避免把自然语言说明误识别为模块。
+- 协调真实 LLM 多轮生成超时：Parser 默认 Generator 调用超时提升到 420 秒，Compose 注入默认同步为 420 秒，宿主 smoke 客户端超时提升到 540 秒。
+- 验证：`test_llm_multi_file_explicit_workflow.py` 真实 LLM 链路完成 `parser_initialize -> gen_stateless -> verify_stateless -> archive_success`，生成三份 RTL 文件并通过 Verify PASS；smoke 断言改为要求 Architect/Coder transcript，Parser transcript 作为可选分析产物。
+# 2026-05-29 v1
+
+- 完成项目文档品牌迁移：将项目描述更新为 `IC Unified - Multi-agent Unified Joint IC Automation`，明确 ICU-MUJICA 继承自 AGVS4RTL，曾作为重构分支，现转入独立开发；保留旧 README 备份 `README.md.bak`。
+- 增强 LLM 运行时配置：主环境变量与内部请求头迁移为 `ICU_MUJICA_LLM_*` / `X-ICU-MUJICA-LLM-*`，保留 `AGVS4RTL_*` 兼容回退；补充 `reasoning_effort` 透传、网络重试与 CoT/推理文本剥离，避免运行时敏感配置写入任务产物。
+- 收紧生成失败语义：Generator 真实 LLM 路径取消 dummy fallback，Architect / Coder 失败会记录修复上下文与错误产物，由 Parser / Verify 明确暴露失败，不再静默产出假 PASS。
+- 完成 Verilog-2001 约束收敛：协议、提示词与 Verify 解析均禁止 SystemVerilog `logic` 等新语法，端口类型限定为 `wire` / `reg`，避免生成不可被当前工具链稳定处理的 RTL。
+- 强化 `SpecReg` 图结构校验：禁止 `TOP` 作为普通 `nodes` 节点；层次化设计存在节点时必须提供 `edges`；TOP 边端口必须匹配顶层端口方向；每个子节点必须与 TOP 具备可达与反向可达关系，避免接口契约只藏在自然语言 `implementation_hint` 中。
+- 引入 graph-driven skeleton elaboration：Generator 根据 `SpecReg.edges` 推导子模块端口契约、内部连线与顶层实例化，顶层 RTL skeleton 由图确定性生成；顶层文件不再交给 LLM 自由猜测端口连接，子模块输出端口默认使用 `output reg` 以兼容过程赋值。
+- 增强 Architect 提示词约束：要求层次化/模块化设计必须把子模块接口写入 graph edges，不能仅在说明文本中描述；明确低位宽计算单元组合、模块复用等结构性需求需要体现在节点和边中。
+- Parser / Compose 超时配置补齐：Parser 调用 Generator 与 Verify 的默认超时统一提升到 420 秒，并通过 `GEN_SERVICE_TIMEOUT_SECONDS` / `VERIFY_SERVICE_TIMEOUT_SECONDS` 注入 Compose，降低真实 LLM 与 Verify 慢路径误超时概率。
+- 新增 Gradio 控制台 `app/gradio_ui.py`：支持 Parser 健康检查、工作流提交、实时轮询进度、Artifact/RTL/SpecReg/VerifyRpt/HardwareGraph 预览、Mermaid 图渲染、LLM runtime 表单，以及已归档任务状态刷新。
+- Gradio 控制台新增未完成任务面板：动态扫描 `shared_workspace/TASK_*` 与未归档 `output/TASK_*`，不额外落盘任务索引；支持刷新、检查、加载原始请求到表单、直接重试和删除残留任务目录。
+- 完成本轮容器与 GUI 验证：重建并重启 `parser` / `gen` / `verify` 三服务，确认 Parser health 正常；重启 Gradio GUI 至 `127.0.0.1:7860`，通过浏览器验证未完成任务列表、Load For Retry、删除测试任务与 Refresh Latest Output 可用。
+- 现场评估混合位宽 PE 生成结果：普通提示词可得到可编译扁平 MAC，但缺少低位单元组合结构；强化提示词后模型开始尝试 2-bit 基础乘法与 shift-add 组合，并推导 17-bit 累加结果，但仍暴露 Verilog function 参数与 graph 未层级化问题。当前系统定位为可用的 RTL 生成工作流框架，复杂架构级设计仍需进一步把结构语义硬化到 Architect / Verify 规则中。

@@ -21,7 +21,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
-    title="AGVS4RTL Parser Service",
+    title="ICU-MUJICA Parser Service",
     version="0.1.0",
     description="对外统一入口，负责任务接收、解析与编排。",
 )

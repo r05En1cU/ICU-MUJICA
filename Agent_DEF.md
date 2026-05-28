@@ -1,153 +1,366 @@
-以下是对 **Parser 模块** 行为的技术定义：
+# ICU-MUJICA Agent Definition
+
+ICU-MUJICA（IC Unified - Multi-agent Unified Joint IC Automation）是一个面向 IC/RTL 自动化生成、验证与迭代修复的多 Agent 工作流框架。项目继承自 AGVS4RTL，曾作为其重构分支推进，当前已转入独立开发。
+
+当前阶段的系统目标不是一次性替代人工 RTL 设计，而是提供一个可运行、可观测、可失败归因的生成-验证闭环：能够从自然语言需求生成结构化规约，产出可综合 Verilog-2001 RTL，执行静态/编译级验证，并在失败时保留可供下一轮修复使用的结构化反馈。
 
 ---
 
-### 1. I/O 行为：任务初始化与持久化
-这是工作流的“冷启动”阶段。
-* **UUID 分配**：调用 `generate_global_task_id()`。
-* **目录结构规范**：
-    ```text
-    /Output
-      └── /TASK_20260324_8a2b3c4d  <-- 全局唯一 TaskID
-          ├── /Origin              <-- 原始需求文档 (.txt, .pdf, .v)
-          ├── /UserTaskSpec.json   <-- Parser 产出的结构化规约
-          └── /Archive             <-- (最终存档区)
-    ```
-* **操作**：Parser 接收到请求后，第一时间同步创建物理目录，将原始输入落盘。
+## 1. 总体架构
+
+系统由三个容器化内部服务和一个宿主机 GUI 构成：
+
+```text
+User / Gradio UI
+  |
+  v
+Parser service  (external: 127.0.0.1:8001)
+  |
+  +--> Generator service (internal: gen:8000)
+  |
+  +--> Verify service    (internal: verify:8000)
+
+Persistent task data:
+  output/TASK_ID/{Origin,Result,Archive}
+  shared_workspace/TASK_ID/{specs,rtl,sim,graphs,llm}
+```
+
+- `parser` 是唯一对宿主机暴露 HTTP 入口的服务，负责请求接收、任务初始化、状态机编排、重试路由和归档。
+- `gen` 与 `verify` 仅在 Docker 内部网络中开放 API，不直接暴露给外部用户。
+- 大对象通过共享文件系统传递，HTTP 层只传输路径、状态摘要和结构化报告。
+- Gradio GUI 位于 `app/gradio_ui.py`，用于健康检查、提交任务、观察进度、预览产物、管理未完成任务。
 
 ---
 
-### 2. 读取后：语义路由与规约生成
-这是 Parser 的“大脑”功能，核心是将非结构化文本转化为结构化 Pydantic 模型。
-* **UserTaskSpec 实例化**：利用 LLM 提取关键字段（如 `top_module`, `intent`, `design_rules`）。
-* **语义路由 (Semantic Router)**：
-    * **过滤层**：识别是否包含非法请求或超出能力的范围。
-    * **决策层**：判定 `IntentCategory`。例如，用户提到“修复”，路由至 `FIX_BUG`；提到“新模块”，路由至 `GEN_WITH_TEST`。
-* **任务队列**：将实例化的 `WorkTaskPayload` 推送至任务总线（Fast
-API）。
+## 2. 核心设计原则
+
+### 2.1 阶段产物清晰分工
+
+- Parser 维护 `UserTaskSpec`：用户意图、顶层模块、原始需求与提炼后的需求。
+- Generator Architect 维护 `SpecReg`：结构化接口、参数、功能要求、时钟复位、协议、RTL 图结构。
+- Generator Coder 维护 RTL：根据 `SpecReg` 生成 Verilog-2001 源码。
+- Verify 维护 `VerifyRpt`：验证 verdict、错误快照、修复建议与日志路径。
+
+### 2.2 控制面与数据面分离
+
+- 控制面：`WorkflowTraceStep`、`GenNodeOutput`、`VerifyNodeOutput` 等轻量结构。
+- 数据面：`UserTaskSpec.json`、`SpecReg_iterN.json`、`*.v`、`VerifyRpt_iterN.json`、日志、图文件、LLM transcript。
+- 服务间不通过 HTTP 传递完整 RTL、仿真日志或大块模型响应文本。
+
+### 2.3 失败必须显式暴露
+
+真实 LLM 路径不允许用 dummy RTL 静默兜底。Architect、Coder 或 Verify 失败时，应落盘 transcript、修复上下文和结构化错误，并由 Parser 明确归档为失败或进入下一轮 retry。
+
+### 2.4 Verilog-2001 优先
+
+当前工具链按 Verilog-2001 收敛：
+
+- 禁止输出 SystemVerilog `logic` 等新语法。
+- 顶层端口类型限定为 `wire` / `reg`。
+- Verify 静态端口解析不接受 `logic`。
+- Coder prompt 必须明确“可综合 Verilog-2001”。
 
 ---
 
-### 3. 文件管理：共享工作区 (Sandbox) 策略
-为了保证 Gen（生成）和 Verify（验证）模块能在一个干净的环境下工作：
-* **环境隔离**：将 `/Origin` 中的参考代码或文档复制到 `/SharedWorkspace/TASK_ID/`。
-* **轻量化通信**：不通过 API 发送整个 JSON 字符串，而是将 `UserTaskSpec` 序列化为文件，仅在模块间传递 **`spec_file_path`** 和 **`iteration`** 计数器。
-* **幂等性**：`iteration`决定 Gen 模块是“从零开始”还是“基于上一轮结果增量修改”。
+## 3. Parser Agent
+
+Parser 是系统的 Orchestrator，负责把用户请求转化为可执行任务，并驱动 Generator / Verify 的多轮闭环。
+
+### 3.1 任务初始化
+
+Parser 接收 `WorkflowRunRequest` 后必须：
+
+1. 生成全局唯一 `task_id`。
+2. 创建任务目录：
+   ```text
+   output/TASK_ID/Origin
+   output/TASK_ID/Result
+   output/TASK_ID/Archive
+   shared_workspace/TASK_ID/specs
+   shared_workspace/TASK_ID/rtl
+   shared_workspace/TASK_ID/sim
+   shared_workspace/TASK_ID/graphs
+   shared_workspace/TASK_ID/llm
+   ```
+3. 将原始请求写入 `output/TASK_ID/Origin/request.txt`。
+4. 生成并保存 `UserTaskSpec.json`，同时放入 output 与 shared workspace。
+
+### 3.2 语义解析与路由
+
+Parser 可使用 LLM 生成结构化 `ParserLlmAnalysis`，用于辅助：
+
+- intent 分类；
+- 需求提炼；
+- 顶层模块名识别；
+- 目标协议、设计规则和非法条件识别。
+
+如果 LLM 不可用、返回不可校验内容或运行时禁用，则回退到保守关键词路由与原始需求兜底。显式请求字段优先级高于 LLM 推断字段。
+
+### 3.3 工作流状态机
+
+当前主路径为：
+
+```text
+parser_initialize
+  -> gen_stateless
+  -> verify_stateless
+  -> archive_success | prepare_retry | archive_failed
+```
+
+Parser 根据 `VerifyRpt.verdict` 决策：
+
+- `PASS`：归档到 `output/TASK_ID/Result`。
+- `FAIL_SEMANTIC` / `FAIL_COMPILE` / 可恢复仿真失败：若未达到最大轮次，进入 `prepare_retry`。
+- `INFRA_ERROR` / 不可恢复错误 / 达到最大轮次：归档到 `output/TASK_ID/Archive`。
+
+### 3.4 超时与运行时配置
+
+- Generator 调用超时由 `GEN_SERVICE_TIMEOUT_SECONDS` 控制，默认 420 秒。
+- Verify 调用超时由 `VERIFY_SERVICE_TIMEOUT_SECONDS` 控制，默认 420 秒。
+- LLM 运行时配置优先使用请求体 `llm` 字段，其次读取环境变量。
+- 当前主前缀为 `ICU_MUJICA_LLM_*` 和 `X-ICU-MUJICA-LLM-*`，兼容旧 `AGVS4RTL_*` 前缀。
 
 ---
 
-### 4. 模块通信：状态机与大文件规避
-* **控制面 (Control Plane)**：模块间回传 `WorkflowTraceStep`。包含 `status` (success/error) 和 `detail`。
-* **数据面 (Data Plane)**：模块不返回 RTL 代码字符串，而是返回 `rtl_path` 或 `sim_log_path`。
-* **Parser 的角色**：Parser 此时充当 **Orchestrator（编排器）**。它读取 `VerifyNodeOutput.report.verdict`，如果失败，则根据 `error_details` 决定是否发起下一轮 `iteration`。
+## 4. Generator Agent
 
+Generator 在系统中承担 “Architect + Coder” 双角色。
 
+### 4.1 输入与输出边界
+
+输入：
+
+- `WorkTaskPayload`；
+- `UserTaskSpec.json` 路径；
+- 当前 `iteration`；
+- 若为 retry，读取上一轮 `SpecReg_iterN.json` 与 `VerifyRpt_iterN.json`。
+
+输出：
+
+- `SpecReg_iterN.json`；
+- 一个或多个 Verilog RTL 文件；
+- `HardwareGraph_iterN.json` / `HardwareGraph_iterN.mmd`；
+- `ArchitectChat_iterN.json`、`CoderChat_iterN.json` 等 LLM transcript；
+- `GenNodeOutput`，仅回传路径与摘要。
+
+### 4.2 Architect 阶段：SpecReg
+
+`SpecReg` 是 Generator 的结构化设计契约。它必须包含：
+
+- `top_module`；
+- 参数与端口定义；
+- clock/reset；
+- protocols；
+- functional requirements；
+- corner cases / illegal conditions / latency notes；
+- RTL graph：`nodes` + `edges`。
+
+Architect LLM 输出必须通过 Pydantic `SpecReg.model_validate(...)` 严格校验。校验失败时允许进行 repair frame 修复，但不允许 silently fallback 到与用户需求无关的 dummy 设计。
+
+### 4.3 Graph 约束
+
+RTL graph 是层次化设计的结构事实来源：
+
+- 顶层统一用特殊端点 `TOP`，但 `TOP` 不得出现在 `nodes` 中。
+- 若 `nodes` 非空，则 `edges` 必须非空。
+- 每个非 TOP 节点必须至少参与一条边。
+- 每个子节点必须从 TOP 输入/双向端口可达，并能反向到达 TOP 输出/双向端口。
+- 任何子模块端口若需要被 Coder 使用，必须出现在某条 edge endpoint 中。
+- `implementation_hint` 只能补充实现建议，不能承载唯一的接口契约。
+
+### 4.4 Graph-driven Skeleton Elaboration
+
+当 `SpecReg.nodes` 和 `SpecReg.edges` 描述层次结构时，Generator 应确定性生成顶层 skeleton：
+
+- 根据 `SpecReg.ports` 生成顶层 module header。
+- 根据 child incident edges 推导子模块端口契约。
+- 根据 child-child edges 生成内部 wire。
+- 根据 TOP-child edges 连接顶层端口和子模块端口。
+- 顶层实例化不交给 LLM 自由发挥。
+
+子模块 RTL 仍可由 Coder LLM 生成，但其 module header 必须服从 graph-derived port contract。子模块输出端口默认可使用 `output reg`，以兼容过程赋值风格。
+
+### 4.5 Coder 阶段：RTL 生成
+
+Coder 必须：
+
+- 输出可综合 Verilog-2001；
+- 只输出目标 RTL 文件内容，不输出 Markdown 包裹；
+- 遵守 Architect 的 `SpecReg`；
+- 在 retry 中消费上一轮 `VerifyRpt` 的错误摘要；
+- 多文件任务按 `rtl_paths` 作为同一编译单元产出。
+
+若 Coder 失败，应记录失败 transcript 和错误上下文，不得用虚假 PASS 产物掩盖失败。
 
 ---
 
-### 5. 结束存档：清理与归档
-* **原子化操作**：任务完成（PASS）或达到最大重试轮次（FAIL）后，触发归档。
-* **Archive 动作**：将 `/SharedWorkspace` 中产生的所有中间产物（生成的 Verilog、波形文件 .vcd、日志）搬运回 `/Output/TASK_ID/Result`。
-* **空间回收**：`rm -rf /SharedWorkspace/TASK_ID`。
+## 5. Verify Agent
+
+Verify 是裁决器与诊断器。它不修改 RTL，只判断当前产物是否满足 `SpecReg` 契约，并生成可供 Parser 路由和 Generator retry 使用的反馈。
+
+### 5.1 验证流程
+
+当前 Verify 内部流程为：
+
+```text
+init_context
+  -> semantic_check
+  -> compile_check
+  -> diagnostic_enhance
+  -> finalize
+```
+
+### 5.2 Verdict 语义
+
+- `PASS`：静态契约与编译检查通过。
+- `FAIL_SEMANTIC`：模块名、端口集合、端口方向、端口位宽、顶层/子模块契约不一致。
+- `FAIL_COMPILE`：`iverilog` 编译或 elaboration 失败。
+- `FAIL_SIMULATION`：预留给动态仿真/断言失败。
+- `INFRA_ERROR`：文件缺失、路径失效、工具不可用、服务异常等基础设施问题。
+- `TIMEOUT`：验证执行超时。
+
+### 5.3 静态契约检查
+
+Verify 当前至少需要检查：
+
+- SpecReg 文件存在且可解析；
+- RTL 文件存在且可读取；
+- 顶层 module name 与 `SpecReg.top_module` 一致；
+- RTL 顶层端口集合与 `SpecReg.ports` 严格一致；
+- 端口方向与位宽一致；
+- Verilog-2001 约束未被破坏；
+- 多 RTL 文件可作为同一编译单元交给 `iverilog`。
+
+后续应扩展 graph contract 检查：当 `SpecReg.edges` 描述了子模块接口时，Verify 应确认子模块 module header 与 graph-derived child port contract 一致。
+
+### 5.4 LLM 诊断增强
+
+Verify LLM 只负责解释失败和补充修复建议，不决定 verdict。LLM 调用失败时必须保持确定性检查结果不变。
+
+诊断 transcript 写入：
+
+```text
+shared_workspace/TASK_ID/llm/VerifyChat_iterN.json
+```
+
+其中不得包含 API key、base URL 或其他敏感运行时配置。
 
 ---
 
-以下是对 **Gen (Generator) 模块** 行为的技术定义：
+## 6. LLM Runtime 与安全边界
 
-### 6. I/O 行为：内部服务与通信层
-这是 Gen 模块接收任务与回传产物的物理边界。
-* **网络隔离**：基于 FastAPI 构建，仅在 Docker 容器内部网络中提供 API 接口服务，不对外开放端口，保障系统安全性。
-* **输入接收**：接收来自 Parser 的任务载荷，解析并读取前置依赖，如 `TaskSpec` 以及（在重试迭代中的）`VerifyRpt` 验证报告。
-* **输出发射**：遵循轻量化通信协议，发送 `SpecReg` 的文件路径和 RTL 生成代码的路径给编排器，不直接通过 HTTP 传递大规模文本或代码串。
+运行时配置来源优先级：
 
-### 7. 核心逻辑：多轮对话与 RTL 生成
-Gen 模块在系统中扮演“架构师 + 程序员”的双重角色。
-* **工作区访问**：直接挂载并访问 `/SharedWorkspace/TASK_ID/` 目录，从中读取原始参考文档、旧版本代码块等上下文信息。
-* **多轮对话逻辑**：维护多轮交互上下文。当 `iteration > 0` 时，Gen 模块会根据 Verify 模块提供的 `VerifyRpt`（错误日志、波形反馈等）进行对齐和反思，驱动大模型对原有代码进行增量修复。
-* **代码生成**：生成符合语法规范和设计意图的 Verilog 代码，并自动将产物落盘到共享工作区的 `/rtl` 子目录下。
+1. 请求体 `WorkflowRunRequest.llm`；
+2. 环境变量 `ICU_MUJICA_LLM_*`；
+3. 兼容环境变量 `AGVS4RTL_LLM_*`。
 
-### 8. 规约抽象：SpecReg (规格注册表)
-为了在多 Agent 协同中消除大模型的“幻觉”与接口不匹配问题。
-* **文档定义**：`SpecReg` 是一份在内部维护的增量、只读文档，它是对原始 `TaskSpec` 的技术具象化。
-* **核心内容**：`SpecReg` 内部维护**类图架构逻辑**。
-    * **图结构特征**：类图架构逻辑特指多轮对话生成的 Verilog 模块逻辑。因为 Verilog 模块是不同于常规软件代码树状结构的**图结构**（视模块内部逻辑或子模块为节点，端口连线为边）。
-    * **渐进式细化**：我们在逐次对话中逐步细化 Verilog 模块图的节点，不断拆解和具象化，直到该节点被完全实现为纯组合逻辑（或基础时序逻辑）为止。
-* **消费端**：`SpecReg` 存放于共享工作区，不仅指导当前迭代的代码生成，后续也将作为契约供 Verify 模块执行静态语法与动态语义的核查。
+支持字段包括：
+
+- `enabled`；
+- `base_url`；
+- `api_key`；
+- `model`；
+- `profile`；
+- `reasoning_effort`。
+
+安全要求：
+
+- API key 不写入 `UserTaskSpec`、trace、Output、shared workspace 或 LLM transcript。
+- transcript 只保留 messages、非敏感请求参数、响应文本、usage 和错误摘要。
+- 需要剥离模型返回中的 chain-of-thought / reasoning 隐式文本，只保留可执行或可审计输出。
 
 ---
 
-以下是对 **Verify 模块** 行为的技术定义：
+## 7. Gradio Control Panel
 
-## 9. I/O 行为：内部验证服务与通信边界
+Gradio GUI 是当前开发与人工审查入口，默认监听：
 
-这是 Verify 模块接收任务、执行核查并回传验证结果的物理边界。  
-* **网络隔离**：基于 FastAPI 构建，仅在 Docker 容器内部网络中提供 API 接口服务，不对外开放端口，保障验证环境与工具链的安全性。  
-* **输入接收**：接收来自 Parser 编排器的验证任务载荷，读取 `spec_file_path` 指向的 SpecReg 文件与 `rtl_path` 指向的待验证 Verilog 源码；必要时可通过共享工作区读取前序迭代产物与原始上下文。  
-* **输出发射**：遵循轻量化通信协议，不通过 HTTP 回传完整日志、波形或源码文本，而是返回结构化 `VerifyNodeOutput`，其中包含 `VerifyRpt` 验证报告与可选的日志/波形文件路径。  
-* **文件落盘**：验证过程中产生的编译日志、仿真日志、波形文件与验证报告统一写入 `/SharedWorkspace/TASK_ID/sim` 或约定目录，供 Parser 归档与 Generator 后续迭代读取。
+```text
+http://127.0.0.1:7860/
+```
 
-## 10. 核心逻辑：分层验证与结果裁决
+必须支持：
 
-Verify 模块在系统中扮演“裁判 + 诊断器”的角色。  
-它的职责不是修改 RTL，而是基于 SpecReg 契约对当前迭代的 RTL 实现执行分层验证，并输出可供工作流路由与下一轮修复消费的结构化反馈。  
-* **上下文装载**：读取并解析当前任务的 SpecReg、RTL 文件以及必要的任务元信息（如 `task_id`、`iteration`、`top_module`），建立本轮验证上下文。  
-* **静态契约核查**：优先执行轻量级的静态一致性检查，包括模块名、端口定义、时钟/复位接口、关键约束是否与 SpecReg 一致。若发现接口不匹配、顶层定义缺失或契约违背，则判定为 `FAIL_SEMANTIC`。  
-* **编译可行性核查**：在静态核查通过后，调用轻量工具链（如 `iverilog`）执行 Verilog 编译检查。若 RTL 无法通过语法或编译阶段，则判定为 `FAIL_COMPILE`。  
-* **动态行为核查**：在后续能力扩展中，Verify 可基于 SpecReg 中的 `functional_requirements`、`corner_cases` 与 `verification_directives` 自动生成或调度测试激励，执行动态仿真。若功能行为不符合契约，则判定为 `FAIL_SIMULATION`。  
-* **基础设施异常判定**：若验证工具不可用、路径失效、文件损坏、仿真环境异常或执行超时，则判定为 `INFRA_ERROR` 或 `TIMEOUT`，与设计本身错误区分开。  
-* **最终裁决**：若各级检查全部通过，则输出 `PASS`；否则输出最具代表性的失败结论，并附带错误快照与修复建议。
+- Parser health check；
+- workflow request 构造与提交；
+- LLM runtime 表单；
+- 后台提交 + 轮询刷新，避免长请求阻塞 UI；
+- agent progress table；
+- Artifact 列表；
+- RTL / SpecReg / VerifyRpt 预览；
+- HardwareGraph Mermaid 和 JSON 预览；
+- Raw response 预览。
 
-## 11. 规约消费：以 SpecReg 为验证契约
+未完成任务面板必须动态扫描现有目录，不额外落盘索引文件：
 
-为了保证验证逻辑与生成逻辑解耦，Verify 模块不直接依赖用户原始自然语言，而是以 Generator 产出的 SpecReg 作为主验证契约。  
-* **契约中心化**：SpecReg 中定义的模块名、端口、参数、时钟复位、功能要求、边界场景与非法条件，是 Verify 判定 RTL 是否“实现正确”的主要依据。  
-* **接口核查依据**：静态验证阶段以 `ports`、`clock_and_reset`、`protocols` 等结构化字段为准，判断 RTL 是否满足接口层约束。  
-* **行为验证依据**：动态仿真阶段以 `functional_requirements`、`corner_cases`、`illegal_conditions`、`latency_notes` 与 `verification_directives` 为核心输入，构建测试策略与断言判据。  
-* **去自然语言漂移**：通过以 SpecReg 为中心的消费模式，减少 Verify 直接依赖原始需求文本所带来的语义漂移与解释不一致问题。  
-* **多轮闭环支撑**：当 iteration > 0 时，Verify 生成的报告将反向作为 Generator 修复的输入之一，使 SpecReg 与 VerifyRpt 共同构成系统闭环中的“契约 + 反馈”双文档机制。
+- 来源：`shared_workspace/TASK_*` 与未归档 `output/TASK_*`；
+- 操作：Refresh、Inspect、Load For Retry、Retry Task、Delete Task；
+- 删除操作同时清理对应 `shared_workspace/TASK_ID` 与 `output/TASK_ID` 目录；
+- 对真实任务删除应视为不可逆清理动作。
 
-## 12. 错误压缩：结构化报告与修复提示
+---
 
-Verify 模块不仅要判断“是否通过”，还要将底层验证噪声压缩为可供上游消费的结构化诊断结果。  
-* **错误分类**：将验证失败归类为接口/语义不匹配、编译错误、仿真断言失败、基础设施异常、超时等不同类别。  
-* **错误提炼**：从编译器输出、仿真日志或端口比对结果中提取关键信息，如缺失端口、错误行号、断言名、失败时刻与摘要信息，写入 `ErrorSnapshot`。  
-* **修复建议**：基于失败类型生成简短的 `suggested_fix`，用于提示 Generator 是需要“代码级重写”还是“架构级回退重构”。  
-* **工作流可路由性**：VerifyRpt 中的 `verdict` 必须足够稳定，使 Parser 可以据此决定：
-  * 是否进入成功归档；
-  * 是否允许重试；
-  * 是否应触发架构级修复或代码级修复；
-  * 是否因基础设施错误直接终止流程。  
-* **轻量回传**：API 返回时只发送结构化摘要与路径，不直接传输大型日志文件、波形文件或仿真输出全文。
+## 8. 文件与归档约定
 
-## 13. 文件管理：验证产物目录与版本规则
+任务运行时：
 
-为了保证多轮迭代下的验证结果可追溯、可复盘、可被 Generator 消费，Verify 模块需要遵守统一的文件落盘约定。  
-* **结果目录**：验证相关产物统一写入 `/SharedWorkspace/TASK_ID/sim/`，包括编译日志、仿真日志、波形文件与结构化验证报告。  
-* **报告命名**：建议按迭代轮次落盘验证报告，例如 `VerifyRpt_iter0.json`、`VerifyRpt_iter1.json`，与 Generator 侧的 `SpecReg_iterN.json` 保持版本对应关系。  
-* **日志命名**：建议按轮次或阶段命名编译/仿真日志，如 `compile_iter0.log`、`sim_iter0.log`，便于后续问题定位。  
-* **波形管理**：若启用动态仿真并生成波形文件，建议统一写入 `sim/` 目录，命名中显式包含 iteration，避免多轮结果互相覆盖。  
-* **归档协同**：Verify 本身不负责最终归档，仅负责保证文件在共享工作区中可被 Parser 在任务结束时统一搬运到 `Output/TASK_ID/Result` 或 `Archive`。
+```text
+shared_workspace/TASK_ID/
+  specs/UserTaskSpec.json
+  specs/SpecReg_iterN.json
+  rtl/*.v
+  sim/VerifyRpt_iterN.json
+  sim/compile_iterN.log
+  graphs/HardwareGraph_iterN.json
+  graphs/HardwareGraph_iterN.mmd
+  llm/*Chat_iterN.json
+```
 
-## 14. 模块通信：与 Parser / Generator 的闭环协作
+任务结束后：
 
-Verify 模块是完整工作流中的中间裁决节点，其输出将直接影响 Parser 的路由决策与 Generator 的下一轮生成策略。  
-* **面向 Parser**：回传 `VerifyNodeOutput`，其中最关键的是 `report.verdict`。Parser 依据该 verdict 决定工作流进入成功归档、失败归档还是下一轮重试。  
-* **面向 Generator**：当验证失败且允许重试时，VerifyRpt 中的 `error_details` 与 `suggested_fix` 将作为 Generator 下一轮修复的重要输入。  
-* **重构级别提示**：Verify 的失败语义需要足够清晰，使上游可以区分这是：
-  * 仅需代码修补的 `CODE_REWRITE`
-  * 需要规格/结构调整的 `ARCH_REFACTOR`
-  * 或无需重构的 `NONE`  
-* **轻控制、重数据分离**：Parser 与 Verify 间仅传递任务元信息与文件路径；实际的大文件（日志、波形、报告）始终通过共享工作区完成协作。  
-* **迭代一致性**：Verify 必须以当前 `iteration` 为准执行验证与落盘，确保多轮结果不混淆，并使 Generator 能稳定读取上一轮验证反馈。
+- 成功：复制到 `output/TASK_ID/Result/shared_workspace`。
+- 失败：复制到 `output/TASK_ID/Archive/shared_workspace`。
+- 原始请求保留在 `output/TASK_ID/Origin`。
+- Parser 可清理 `shared_workspace/TASK_ID`；GUI 未完成任务列表以目录是否仍存在和归档状态动态推断。
 
-## 15. 结束输出：验证结论的最小闭环要求
+---
 
-在当前阶段，Verify 模块的首要目标不是实现完整高级仿真，而是先补齐系统的最小验证闭环，使工作流从“能生成”升级到“能判定”。  
-* **最小能力要求**：
-  * 检查 SpecReg 文件存在且可解析；
-  * 检查 RTL 文件存在且可读取；
-  * 执行最小静态契约检查；
-  * 可选执行 `iverilog` 编译检查；
-  * 生成结构化 `VerifyRpt` 并返回 `VerifyNodeOutput`。  
-* **最小闭环意义**：即使暂时不具备完整 testbench 或 cocotb 仿真能力，只要 Verify 能稳定输出 `PASS / FAIL_SEMANTIC / FAIL_COMPILE / INFRA_ERROR` 等判决，系统就已经具备最基础的自动反馈与路由能力。  
-* **后续扩展方向**：在最小 Stub 稳定后，再逐步引入动态仿真、断言生成、覆盖率统计与更细粒度的修复建议，使 Verify 从“最小裁判”演进为“完整验证 Agent”。
+## 9. 当前能力边界
+
+当前系统已经具备：
+
+- 三服务生成-验证-归档闭环；
+- 基本 retry 路由；
+- 真实 LLM Parser / Architect / Coder / Verify 诊断路径；
+- 严格端口契约检查；
+- 多 RTL 文件编译单元支持；
+- Verilog-2001 收敛；
+- graph-derived top skeleton；
+- GUI 实时观察与未完成任务管理。
+
+当前仍不应宣称具备：
+
+- 稳定的复杂微架构综合能力；
+- 自动保证 BitFusion / systolic array / pipeline 等结构性需求完全实现；
+- 完整动态仿真与覆盖率闭环；
+- 对所有 LLM 输出的形式化正确性保证。
+
+现场评估结论：
+
+- 简单和中等 RTL 任务已可作为可审查初稿生成工具使用。
+- 复杂结构需求可能退化为扁平功能实现，或出现可修复的 Verilog 细节错误。
+- 对复杂架构任务，必须继续把结构语义硬化到 Architect prompt、SpecReg graph validation 和 Verify graph contract 中。
+
+---
+
+## 10. 后续演进方向
+
+优先级从高到低：
+
+1. 为结构性需求增加 Architect 硬规则：检测到“低位宽单元组合、复用、BitFusion、tile、adder tree、controller”等关键词时，禁止空 `nodes/edges`。
+2. Verify 增加 graph-derived child port contract 检查，确保子模块 header 与 `SpecReg.edges` 一致。
+3. 对常见 Verilog-2001 错误增加静态预检查，例如 function 参数声明、parameterized width 解析、非法数组声明位置。
+4. 增加轻量 testbench / directed simulation 生成能力，覆盖 `functional_requirements` 与 `corner_cases`。
+5. 将 GUI 中的失败归因和 retry 建议展示得更直接，减少手工翻 artifact 的成本。
+6. 继续维护“不假通过”的系统原则：无法满足结构契约时应失败并解释，而不是生成看似可用的弱实现。

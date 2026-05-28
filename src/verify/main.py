@@ -6,20 +6,39 @@ from src.common.models import ApiResponse, LlmRuntimeConfig, VerifyNodeOutput, V
 from src.verify.workflow import run_verify_workflow
 
 
-LLM_HEADER_ENABLED = "X-AGVS4RTL-LLM-Enabled"
-LLM_HEADER_BASE_URL = "X-AGVS4RTL-LLM-Base-URL"
-LLM_HEADER_API_KEY = "X-AGVS4RTL-LLM-API-Key"
-LLM_HEADER_MODEL = "X-AGVS4RTL-LLM-Model"
-LLM_HEADER_PROFILE = "X-AGVS4RTL-LLM-Profile"
+LLM_HEADER_ENABLED = "X-ICU-MUJICA-LLM-Enabled"
+LLM_HEADER_BASE_URL = "X-ICU-MUJICA-LLM-Base-URL"
+LLM_HEADER_API_KEY = "X-ICU-MUJICA-LLM-API-Key"
+LLM_HEADER_MODEL = "X-ICU-MUJICA-LLM-Model"
+LLM_HEADER_PROFILE = "X-ICU-MUJICA-LLM-Profile"
+LLM_HEADER_REASONING_EFFORT = "X-ICU-MUJICA-LLM-Reasoning-Effort"
+LEGACY_LLM_HEADER_ENABLED = "X-AGVS4RTL-LLM-Enabled"
+LEGACY_LLM_HEADER_BASE_URL = "X-AGVS4RTL-LLM-Base-URL"
+LEGACY_LLM_HEADER_API_KEY = "X-AGVS4RTL-LLM-API-Key"
+LEGACY_LLM_HEADER_MODEL = "X-AGVS4RTL-LLM-Model"
+LEGACY_LLM_HEADER_PROFILE = "X-AGVS4RTL-LLM-Profile"
+LEGACY_LLM_HEADER_REASONING_EFFORT = "X-AGVS4RTL-LLM-Reasoning-Effort"
+
+
+def _header_value(request: Request, name: str, legacy_name: str | None = None, default: str | None = None) -> str | None:
+    value = request.headers.get(name)
+    if value is not None:
+        return value
+    if legacy_name is not None:
+        legacy_value = request.headers.get(legacy_name)
+        if legacy_value is not None:
+            return legacy_value
+    return default
 
 
 def _load_llm_config_from_headers(request: Request) -> LlmRuntimeConfig:
     return LlmRuntimeConfig(
-        enabled=request.headers.get(LLM_HEADER_ENABLED, "false").lower() == "true",
-        base_url=request.headers.get(LLM_HEADER_BASE_URL),
-        api_key=request.headers.get(LLM_HEADER_API_KEY),
-        model=request.headers.get(LLM_HEADER_MODEL),
-        profile=request.headers.get(LLM_HEADER_PROFILE, "default"),
+        enabled=(_header_value(request, LLM_HEADER_ENABLED, LEGACY_LLM_HEADER_ENABLED, "false") or "false").lower() == "true",
+        base_url=_header_value(request, LLM_HEADER_BASE_URL, LEGACY_LLM_HEADER_BASE_URL),
+        api_key=_header_value(request, LLM_HEADER_API_KEY, LEGACY_LLM_HEADER_API_KEY),
+        model=_header_value(request, LLM_HEADER_MODEL, LEGACY_LLM_HEADER_MODEL),
+        profile=_header_value(request, LLM_HEADER_PROFILE, LEGACY_LLM_HEADER_PROFILE, "default") or "default",
+        reasoning_effort=_header_value(request, LLM_HEADER_REASONING_EFFORT, LEGACY_LLM_HEADER_REASONING_EFFORT),
     )
 
 
@@ -38,7 +57,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
-    title="AGVS4RTL Verify Service",
+    title="ICU-MUJICA Verify Service",
     version="0.1.0",
     description="内部验证服务，负责对生成的 SpecReg 与 RTL 执行最小闭环验证。",
 )

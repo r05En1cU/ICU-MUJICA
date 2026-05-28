@@ -6,5 +6,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
-Output/
-shared_workspace/
+output/*
+!output/.gitignore
+shared_workspace/*
+!shared_workspace/.gitignore

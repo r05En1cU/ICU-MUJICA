@@ -9,8 +9,10 @@ from pathlib import Path
 from typing import Annotated, Any, Dict, List, Literal, Optional, TypedDict
 
 import httpx
+from jinja2 import Environment, FileSystemLoader, StrictUndefined
 from langgraph.graph import END, START, StateGraph
 
+from src.common.llm_safety import sanitize_llm_message, strip_visible_cot
 from src.common.models import (
     GenNodeOutput,
     IntentCategory,
@@ -29,11 +31,40 @@ from src.common.models import (
 )
 
 
-LLM_HEADER_ENABLED = "X-AGVS4RTL-LLM-Enabled"
-LLM_HEADER_BASE_URL = "X-AGVS4RTL-LLM-Base-URL"
-LLM_HEADER_API_KEY = "X-AGVS4RTL-LLM-API-Key"
-LLM_HEADER_MODEL = "X-AGVS4RTL-LLM-Model"
-LLM_HEADER_PROFILE = "X-AGVS4RTL-LLM-Profile"
+LLM_HEADER_ENABLED = "X-ICU-MUJICA-LLM-Enabled"
+LLM_HEADER_BASE_URL = "X-ICU-MUJICA-LLM-Base-URL"
+LLM_HEADER_API_KEY = "X-ICU-MUJICA-LLM-API-Key"
+LLM_HEADER_MODEL = "X-ICU-MUJICA-LLM-Model"
+LLM_HEADER_PROFILE = "X-ICU-MUJICA-LLM-Profile"
+LLM_HEADER_REASONING_EFFORT = "X-ICU-MUJICA-LLM-Reasoning-Effort"
+LEGACY_LLM_HEADER_ENABLED = "X-AGVS4RTL-LLM-Enabled"
+LEGACY_LLM_HEADER_BASE_URL = "X-AGVS4RTL-LLM-Base-URL"
+LEGACY_LLM_HEADER_API_KEY = "X-AGVS4RTL-LLM-API-Key"
+LEGACY_LLM_HEADER_MODEL = "X-AGVS4RTL-LLM-Model"
+LEGACY_LLM_HEADER_PROFILE = "X-AGVS4RTL-LLM-Profile"
+
+
+def _env_value(name: str, legacy_name: Optional[str] = None, default: Optional[str] = None) -> Optional[str]:
+    value = os.getenv(name)
+    if value is not None:
+        return value
+    if legacy_name is not None:
+        legacy_value = os.getenv(legacy_name)
+        if legacy_value is not None:
+            return legacy_value
+    return default
+
+
+PROMPT_ENV = Environment(
+    loader=FileSystemLoader(str(Path(__file__).with_name("prompts"))),
+    undefined=StrictUndefined,
+    trim_blocks=True,
+    lstrip_blocks=True,
+)
+
+
+def _render_template(template_name: str, **context: Any) -> str:
+    return PROMPT_ENV.get_template(template_name).render(**context).strip()
 
 
 class WorkflowState(TypedDict):
@@ -46,7 +77,7 @@ class WorkflowState(TypedDict):
     verify_output: Optional[VerifyNodeOutput]  # Verify 节点输出
 
     task_paths: Optional[TaskPaths]  # 统一任务目录布局对象
-    user_task_spec_path: Optional[str]  # Output 目录中的 UserTaskSpec 路径（便于结果查看）
+    user_task_spec_path: Optional[str]  # output 目录中的 UserTaskSpec 路径（便于结果查看）
     origin_input_path: Optional[str]  # 原始输入落盘路径（便于追踪与审计）
 
     max_iterations: int  # 最大允许迭代轮次
@@ -114,11 +145,12 @@ def _resolve_llm_config(request: WorkflowRunRequest) -> LlmRuntimeConfig:
         return request.llm
 
     return LlmRuntimeConfig(
-        enabled=os.getenv("AGVS4RTL_LLM_ENABLED", "false").lower() == "true",
-        base_url=os.getenv("AGVS4RTL_LLM_BASE_URL") or None,
-        api_key=os.getenv("AGVS4RTL_LLM_API_KEY") or None,
-        model=os.getenv("AGVS4RTL_LLM_MODEL") or None,
-        profile=os.getenv("AGVS4RTL_LLM_PROFILE", "default"),
+        enabled=(_env_value("ICU_MUJICA_LLM_ENABLED", "AGVS4RTL_LLM_ENABLED", "false") or "false").lower() == "true",
+        base_url=_env_value("ICU_MUJICA_LLM_BASE_URL", "AGVS4RTL_LLM_BASE_URL") or None,
+        api_key=_env_value("ICU_MUJICA_LLM_API_KEY", "AGVS4RTL_LLM_API_KEY") or None,
+        model=_env_value("ICU_MUJICA_LLM_MODEL", "AGVS4RTL_LLM_MODEL") or None,
+        profile=_env_value("ICU_MUJICA_LLM_PROFILE", "AGVS4RTL_LLM_PROFILE", "default") or "default",
+        reasoning_effort=_env_value("ICU_MUJICA_LLM_REASONING_EFFORT", "AGVS4RTL_LLM_REASONING_EFFORT") or None,
     )
 
 
@@ -151,28 +183,22 @@ def _call_parser_llm(
         raise ValueError("LLM is enabled but model is missing")
 
     allowed_intents = [intent.value for intent in IntentCategory]
+    request_payload = {
+        "top_module": request.top_module,
+        "raw_input_text": request.raw_input_text,
+        "provided_intent": request.intent.value if request.intent is not None else None,
+        "provided_refined_requirements": request.refined_requirements,
+    }
     messages = [
         {
             "role": "system",
-            "content": (
-                "You are the Parser node for an RTL generation workflow. "
-                "Classify the user's task and refine requirements. "
-                "Return JSON only, with keys: intent, refined_requirements, target_protocol, design_rules. "
-                f"intent must be one of: {', '.join(allowed_intents)}. "
-                "Use null when target_protocol is unknown. Keep requirements concise and actionable."
-            ),
+            "content": _render_template("parser_system.j2", allowed_intents=", ".join(allowed_intents)),
         },
         {
             "role": "user",
-            "content": json.dumps(
-                {
-                    "top_module": request.top_module,
-                    "raw_input_text": request.raw_input_text,
-                    "provided_intent": request.intent.value if request.intent is not None else None,
-                    "provided_refined_requirements": request.refined_requirements,
-                },
-                ensure_ascii=False,
-                indent=2,
+            "content": _render_template(
+                "parser_user.j2",
+                request_json=json.dumps(request_payload, ensure_ascii=False, indent=2),
             ),
         },
     ]
@@ -182,6 +208,8 @@ def _call_parser_llm(
         "temperature": 0.0,
         "stream": False,
     }
+    if llm_config.reasoning_effort is not None:
+        payload["reasoning_effort"] = llm_config.reasoning_effort
     headers = {
         "Authorization": f"Bearer {llm_config.api_key.get_secret_value()}",
         "Content-Type": "application/json",
@@ -193,7 +221,7 @@ def _call_parser_llm(
 
     response_payload = response.json()
     try:
-        content = response_payload["choices"][0]["message"]["content"]
+        content = strip_visible_cot(response_payload["choices"][0]["message"]["content"])
     except (KeyError, IndexError, TypeError) as exc:
         raise ValueError("LLM parser response is not OpenAI chat-completions compatible") from exc
     if not isinstance(content, str) or not content.strip():
@@ -211,10 +239,7 @@ def _call_parser_llm(
         sanitized_choices.append(
             {
                 "index": response_choice.get("index"),
-                "message": {
-                    "role": message.get("role"),
-                    "content": message.get("content"),
-                },
+                "message": sanitize_llm_message(message),
                 "finish_reason": response_choice.get("finish_reason"),
             }
         )
@@ -226,6 +251,7 @@ def _call_parser_llm(
             "messages": messages,
             "temperature": payload["temperature"],
             "stream": payload["stream"],
+            "reasoning_effort": payload.get("reasoning_effort"),
         },
         "response": {
             "id": response_payload.get("id"),
@@ -267,6 +293,8 @@ def _build_llm_forward_headers(request: WorkflowRunRequest) -> Dict[str, str]:
         headers[LLM_HEADER_MODEL] = llm_config.model
     if llm_config.api_key is not None:
         headers[LLM_HEADER_API_KEY] = llm_config.api_key.get_secret_value()
+    if llm_config.reasoning_effort is not None:
+        headers[LLM_HEADER_REASONING_EFFORT] = llm_config.reasoning_effort
 
     return headers
 
@@ -276,12 +304,12 @@ def _ensure_task_directories(task_paths: TaskPaths) -> None:
     创建本任务运行所需的全部目录。
 
     目录包括：
-    - Output/TASK_ID/Origin
-    - Output/TASK_ID/Archive
-    - Output/TASK_ID/Result
-    - SharedWorkspace/TASK_ID/specs
-    - SharedWorkspace/TASK_ID/rtl
-    - SharedWorkspace/TASK_ID/sim
+    - output/TASK_ID/Origin
+    - output/TASK_ID/Archive
+    - output/TASK_ID/Result
+    - shared_workspace/TASK_ID/specs
+    - shared_workspace/TASK_ID/rtl
+    - shared_workspace/TASK_ID/sim
     """
     for path_str in [
         task_paths.origin_dir,
@@ -300,11 +328,11 @@ def parser_initialize_node(state: WorkflowState) -> Dict[str, Any]:
 
     职责：
     1. 生成全局唯一 task_id。
-    2. 依据统一目录规范构建 Output 与 SharedWorkspace 路径。
+    2. 依据统一目录规范构建 output 与 shared_workspace 路径。
     3. 创建任务目录。
     4. 将用户原始输入落盘到 Origin。
     5. 进行意图路由，构建 UserTaskSpec。
-    6. 将 UserTaskSpec 同时落盘到 Output 与 SharedWorkspace/specs。
+    6. 将 UserTaskSpec 同时落盘到 output 与 shared_workspace/specs。
     7. 生成轻量任务载荷 WorkTaskPayload，供 Generator/Verify 调度使用。
     """
     request = state["request"]
@@ -321,7 +349,7 @@ def parser_initialize_node(state: WorkflowState) -> Dict[str, Any]:
     # 确保所有目录存在。
     _ensure_task_directories(task_paths)
 
-    # 原始输入首先落盘到 Output/TASK_ID/Origin，作为任务原始审计记录。
+    # 原始输入首先落盘到 output/TASK_ID/Origin，作为任务原始审计记录。
     origin_input_path = Path(task_paths.origin_dir) / request.input_filename
     origin_input_path.write_text(request.raw_input_text or "", encoding="utf-8")
 
@@ -374,7 +402,7 @@ def parser_initialize_node(state: WorkflowState) -> Dict[str, Any]:
         design_rules=parser_analysis.design_rules if parser_analysis is not None else [],
     )
 
-    # 1) 将 UserTaskSpec 保存到 Output/TASK_ID/UserTaskSpec.json，方便归档与人工查看。
+    # 1) 将 UserTaskSpec 保存到 output/TASK_ID/UserTaskSpec.json，方便归档与人工查看。
     output_user_task_spec_path = Path(task_paths.user_task_spec_path)
     output_user_task_spec_path.write_text(
         user_task_spec.model_dump_json(indent=2),
@@ -457,7 +485,8 @@ def gen_stateless_node(state: WorkflowState) -> Dict[str, Any]:
 
     response_payload = response.json()
     if response_payload.get("status") != "success" or response_payload.get("data") is None:
-        raise ValueError("generator returned empty data")
+        downstream_message = response_payload.get("message") or "generator returned empty data"
+        raise ValueError(str(downstream_message))
 
     # 使用当前冻结版模型做协议校验；这里不再放宽 strict。
     gen_output = GenNodeOutput.model_validate(response_payload["data"])
@@ -506,7 +535,11 @@ def verify_stateless_node(state: WorkflowState) -> Dict[str, Any]:
         rtl_paths=gen_output.rtl_paths,
     )
 
-    with httpx.Client(timeout=20.0) as client:
+    try:
+        verify_timeout = float(os.getenv("VERIFY_SERVICE_TIMEOUT_SECONDS", "420"))
+    except Exception:
+        verify_timeout = 420.0
+    with httpx.Client(timeout=verify_timeout) as client:
         response = client.post(
             endpoint,
             json=verify_payload.model_dump(mode="json"),
@@ -516,7 +549,8 @@ def verify_stateless_node(state: WorkflowState) -> Dict[str, Any]:
 
     response_payload = response.json()
     if response_payload.get("status") != "success" or response_payload.get("data") is None:
-        raise ValueError("verify returned empty data")
+        downstream_message = response_payload.get("message") or "verify returned empty data"
+        raise ValueError(str(downstream_message))
 
     verify_output = VerifyNodeOutput.model_validate(response_payload["data"])
 
@@ -612,7 +646,7 @@ def archive_success_node(state: WorkflowState) -> Dict[str, Any]:
     节点 5：成功归档节点。
 
     职责：
-    1. 将 SharedWorkspace/TASK_ID 下的全部中间产物复制到 Output/TASK_ID/Result/shared_workspace。
+    1. 将 shared_workspace/TASK_ID 下的全部中间产物复制到 output/TASK_ID/Result/shared_workspace。
     2. 完成复制后删除 SharedWorkspace/TASK_ID，实现空间回收。
     3. 记录成功归档轨迹。
     """
@@ -652,7 +686,7 @@ def archive_failed_node(state: WorkflowState) -> Dict[str, Any]:
     节点 6：失败归档节点。
 
     职责：
-    1. 当达到最大重试次数后仍未通过验证，将现场复制到 Output/TASK_ID/Archive/shared_workspace。
+    1. 当达到最大重试次数后仍未通过验证，将现场复制到 output/TASK_ID/Archive/shared_workspace。
     2. 保留失败现场用于后续问题排查。
     3. 复制完成后清理 SharedWorkspace/TASK_ID。
     """

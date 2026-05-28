@@ -36,7 +36,7 @@ def generate_global_task_id() -> str:
 
 def _validate_identifier(value: str, field_name: str) -> str:
     if not VERILOG_IDENTIFIER_RE.match(value):
-        raise ValueError(f"{field_name}='{value}' is not a valid Verilog/SystemVerilog identifier")
+        raise ValueError(f"{field_name}='{value}' is not a valid Verilog identifier")
     return value
 
 def _validate_non_empty_str(value: str, field_name: str) -> str:
@@ -67,6 +67,17 @@ def _index_ports_by_name(ports: List["PortDef"]) -> Dict[str, "PortDef"]:
 
 def _index_nodes_by_id(nodes: List["RtlNode"]) -> Dict[str, "RtlNode"]:
     return {n.node_id: n for n in nodes}
+
+def _reachable(start: str, adjacency: Dict[str, List[str]]) -> set[str]:
+    seen = {start}
+    stack = list(adjacency.get(start, []))
+    while stack:
+        node_id = stack.pop()
+        if node_id in seen:
+            continue
+        seen.add(node_id)
+        stack.extend(adjacency.get(node_id, []))
+    return seen
 
 class StrictBaseModel(BaseModel):
     model_config = ConfigDict(
@@ -103,7 +114,6 @@ class PortDirection(str, Enum):
 class PortType(str, Enum):
     WIRE = "wire"
     REG = "reg"
-    LOGIC = "logic"
 
 
 class ResetType(str, Enum):
@@ -123,7 +133,7 @@ class VerifyVerdict(str, Enum):
 
 
 class NodeType(str, Enum):
-    INSTANCE = "instance"
+    MODULE = "module"
     COMBINATIONAL = "combinational"
     SEQUENTIAL = "sequential"
 
@@ -140,6 +150,36 @@ class ArtifactSourceStage(str, Enum):
 class PathKind(str, Enum):
     ABSOLUTE = "absolute"
     WORKSPACE_RELATIVE = "workspace_relative"
+
+
+def _format_verilog_width(width: str) -> str:
+    compact = width.strip()
+    if compact == "1":
+        return ""
+    if re.fullmatch(r"\d+", compact):
+        bit_count = int(compact)
+        if bit_count < 1:
+            raise ValueError("Verilog port width must be a positive bit count")
+        if bit_count == 1:
+            return ""
+        return f"[{bit_count - 1}:0]"
+    if compact.startswith("[") and compact.endswith("]"):
+        return compact
+    return f"[{compact}-1:0]"
+
+
+def _build_verilog_port_declaration(
+    direction: PortDirection,
+    net_type: PortType,
+    width: str,
+    name: str,
+) -> str:
+    width_fragment = _format_verilog_width(width)
+    parts = [direction.value, net_type.value]
+    if width_fragment:
+        parts.append(width_fragment)
+    parts.append(name)
+    return " ".join(parts)
 
 
 # ==========================================
@@ -204,6 +244,7 @@ class PortDef(StrictBaseModel):
     is_clock: bool = Field(default=False, description="是否为时钟端口")
     is_reset: bool = Field(default=False, description="是否为复位端口")
     description: str = Field(default="", description="端口功能说明")
+    verilog_declaration: str = Field(default="", description="ANSI-style Verilog 端口声明，如 input wire [7:0] i_data")
 
     @field_validator("name")
     @classmethod
@@ -218,7 +259,10 @@ class PortDef(StrictBaseModel):
     @field_validator("width")
     @classmethod
     def validate_width(cls, v: str) -> str:
-        return _validate_non_empty_str(v, "port.width")
+        width = _validate_non_empty_str(v, "port.width")
+        if re.fullmatch(r"\d+", width) and int(width) < 1:
+            raise ValueError("port.width must be a positive bit count")
+        return width
 
     @model_validator(mode="after")
     def validate_port_semantics(self) -> "PortDef":
@@ -226,6 +270,11 @@ class PortDef(StrictBaseModel):
             raise ValueError(f"clock port '{self.name}' must be input")
         if self.is_clock and self.is_reset:
             raise ValueError(f"port '{self.name}' cannot be both clock and reset")
+        object.__setattr__(
+            self,
+            "verilog_declaration",
+            _build_verilog_port_declaration(self.direction, self.net_type, self.width, self.name),
+        )
         return self
 
 
@@ -265,10 +314,9 @@ class ProtocolGroup(StrictBaseModel):
 
 class RtlNode(StrictBaseModel):
     node_id: str = Field(..., description="节点唯一标识，如 u_fetch_unit 或 blk_adder")
-    node_type: NodeType = Field(default=NodeType.INSTANCE, description="节点类型")
+    node_type: NodeType = Field(default=NodeType.MODULE, description="节点类型")
     module_name: Optional[str] = Field(default=None, description="若是子模块例化，对应的模块名")
     file_name: Optional[str] = Field(default=None, description="该节点对应的 RTL 文件名")
-    instance_name: Optional[str] = Field(default=None, description="父模块中例化该节点时使用的实例名")
     parent_node_id: Optional[str] = Field(default=None, description="父节点 ID；顶层父节点可使用 TOP")
     description: str = Field(default="", description="节点功能描述与内部逻辑说明")
     implementation_hint: Optional[str] = Field(default=None, description="给 Coder 的模块实现提示")
@@ -290,11 +338,6 @@ class RtlNode(StrictBaseModel):
     def validate_file_name(cls, v: Optional[str]) -> Optional[str]:
         return _validate_optional_non_empty_str(v, "node.file_name")
 
-    @field_validator("instance_name")
-    @classmethod
-    def validate_instance_name(cls, v: Optional[str]) -> Optional[str]:
-        return _validate_optional_identifier(v, "node.instance_name")
-
     @field_validator("parent_node_id")
     @classmethod
     def validate_parent_node_id(cls, v: Optional[str]) -> Optional[str]:
@@ -309,10 +352,10 @@ class RtlNode(StrictBaseModel):
 
     @model_validator(mode="after")
     def validate_node_consistency(self) -> "RtlNode":
-        if self.node_type == NodeType.INSTANCE and not self.module_name:
-            raise ValueError(f"instance node '{self.node_id}' must provide module_name")
-        if self.node_type == NodeType.INSTANCE and self.is_pure_comb_logic:
-            raise ValueError(f"instance node '{self.node_id}' cannot be marked as pure combinational logic")
+        if self.node_type == NodeType.MODULE and not self.module_name:
+            raise ValueError(f"module node '{self.node_id}' must provide module_name")
+        if self.node_type == NodeType.MODULE and self.is_pure_comb_logic:
+            raise ValueError(f"module node '{self.node_id}' cannot be marked as pure combinational logic")
         if self.node_type == NodeType.SEQUENTIAL and self.is_pure_comb_logic:
             raise ValueError(f"sequential node '{self.node_id}' cannot be marked as pure combinational logic")
         if self.node_type in {NodeType.COMBINATIONAL, NodeType.SEQUENTIAL}:
@@ -370,7 +413,7 @@ class TaskPaths(StrictBaseModel):
     output_root: str = Field(..., description="输出根目录")
     shared_workspace_root: str = Field(..., description="共享工作区根目录")
 
-    output_task_dir: str = Field(..., description="Output/TASK_ID")
+    output_task_dir: str = Field(..., description="output/TASK_ID")
     origin_dir: str = Field(..., description="原始输入目录")
     archive_dir: str = Field(..., description="归档目录")
     result_dir: str = Field(..., description="结果目录")
@@ -511,6 +554,9 @@ class SpecReg(BaseSyncMeta):
         if len(node_ids) != len(self.nodes):
             raise ValueError("duplicate node_id found")
 
+        if "TOP" in node_ids:
+            raise ValueError("SpecReg.nodes must not include reserved TOP node; TOP is implicit")
+
         for cr in self.clock_and_reset:
             if cr.clock_name not in port_names:
                 raise ValueError(f"clock '{cr.clock_name}' not found in ports")
@@ -544,10 +590,50 @@ class SpecReg(BaseSyncMeta):
             if edge.target.node_id != "TOP" and edge.target.node_id not in node_ids:
                 raise ValueError(f"edge target node '{edge.target.node_id}' not found")
 
-            if edge.source.node_id == "TOP" and edge.source.port_name not in port_names:
-                raise ValueError(f"edge source TOP port '{edge.source.port_name}' not found")
-            if edge.target.node_id == "TOP" and edge.target.port_name not in port_names:
-                raise ValueError(f"edge target TOP port '{edge.target.port_name}' not found")
+            if edge.source.node_id == "TOP":
+                source_port = port_map.get(edge.source.port_name)
+                if source_port is None:
+                    raise ValueError(f"edge source TOP port '{edge.source.port_name}' not found")
+                if source_port.direction not in {PortDirection.INPUT, PortDirection.INOUT}:
+                    raise ValueError(f"edge source TOP port '{edge.source.port_name}' must be input or inout")
+            if edge.target.node_id == "TOP":
+                target_port = port_map.get(edge.target.port_name)
+                if target_port is None:
+                    raise ValueError(f"edge target TOP port '{edge.target.port_name}' not found")
+                if target_port.direction not in {PortDirection.OUTPUT, PortDirection.INOUT}:
+                    raise ValueError(f"edge target TOP port '{edge.target.port_name}' must be output or inout")
+
+        if self.nodes:
+            if not self.edges:
+                raise ValueError("hierarchical SpecReg with nodes must include graph edges")
+
+            adjacency: Dict[str, List[str]] = {"TOP": []}
+            reverse_adjacency: Dict[str, List[str]] = {"TOP": []}
+            incident_nodes: set[str] = set()
+            for node_id in node_ids:
+                adjacency.setdefault(node_id, [])
+                reverse_adjacency.setdefault(node_id, [])
+
+            for edge in self.edges:
+                source_id = edge.source.node_id
+                target_id = edge.target.node_id
+                adjacency.setdefault(source_id, []).append(target_id)
+                reverse_adjacency.setdefault(target_id, []).append(source_id)
+                if source_id != "TOP":
+                    incident_nodes.add(source_id)
+                if target_id != "TOP":
+                    incident_nodes.add(target_id)
+
+            nodes_from_top = _reachable("TOP", adjacency)
+            nodes_to_top = _reachable("TOP", reverse_adjacency)
+
+            for node in self.nodes:
+                if node.node_id not in incident_nodes:
+                    raise ValueError(f"graph node '{node.node_id}' has no incident edge")
+                if node.node_id not in nodes_from_top:
+                    raise ValueError(f"graph node '{node.node_id}' is not reachable from any TOP input")
+                if node.node_id not in nodes_to_top:
+                    raise ValueError(f"graph node '{node.node_id}' cannot reach any TOP output")
 
         return self
     
@@ -586,8 +672,8 @@ class SpecReg(BaseSyncMeta):
         return [n for n in self.nodes if n.is_rtl_file]
 
 
-    def instance_nodes(self) -> List[RtlNode]:
-        return [n for n in self.nodes if n.node_type == NodeType.INSTANCE]
+    def module_nodes(self) -> List[RtlNode]:
+        return [n for n in self.nodes if n.node_type == NodeType.MODULE]
 
 # ==========================================
 # 6. VerifyRpt - 验证报告
@@ -749,8 +835,9 @@ class LlmRuntimeConfig(StrictBaseModel):
     api_key: Optional[SecretStr] = Field(default=None, description="LLM API key; runtime only, never persisted")
     model: Optional[str] = Field(default=None, description="LLM model name")
     profile: str = Field(default="default", description="非敏感 LLM 配置 profile 名称")
+    reasoning_effort: Optional[str] = Field(default=None, description="Optional reasoning_effort value for compatible models")
 
-    @field_validator("base_url", "model", "profile")
+    @field_validator("base_url", "model", "profile", "reasoning_effort")
     @classmethod
     def validate_optional_text(cls, v: Optional[str], info) -> Optional[str]:
         if info.field_name == "profile" and v is None:
@@ -785,8 +872,8 @@ class WorkflowRunRequest(StrictBaseModel):
     refined_requirements: List[str] = Field(default_factory=list, description="提炼后的需求列表")
     raw_input_text: str = Field(default="", description="原始自然语言输入")
     input_filename: str = Field(default="request.txt", description="原始输入落盘文件名")
-    output_root: str = Field(default="/app/Output", description="输出归档根目录，建议绝对路径")
-    shared_workspace_root: str = Field(default="/app/shared_workspace", description="共享工作区根目录，建议绝对路径")
+    output_root: str = Field(default="/ICU-MUJICA/output", description="输出归档根目录，建议绝对路径")
+    shared_workspace_root: str = Field(default="/ICU-MUJICA/shared_workspace", description="共享工作区根目录，建议绝对路径")
     max_iterations: int = Field(default=2, ge=1, le=10, description="最大迭代轮次")
     llm: Optional[LlmRuntimeConfig] = Field(default=None, description="本次工作流的 LLM 运行时配置；敏感信息不落盘")
 
@@ -839,6 +926,8 @@ class GenNodeOutput(StrictBaseModel):
     rtl_path: str = Field(..., description="Coder 生成的 RTL 文件路径")
     rtl_paths: List[str] = Field(default_factory=list, description="本轮生成的全部 RTL 文件路径；单文件任务为单元素列表")
     top_rtl_path: Optional[str] = Field(default=None, description="顶层 RTL 文件路径；默认与 rtl_path 一致")
+    hardware_graph_path: Optional[str] = Field(default=None, description="硬件图结构 JSON 文件路径")
+    hardware_graph_mermaid_path: Optional[str] = Field(default=None, description="硬件图 Mermaid 文件路径")
     summary: str = Field(..., description="对本次生成动作的简短摘要")
 
     @field_validator("spec_file_path", "rtl_path", "summary")
@@ -855,6 +944,11 @@ class GenNodeOutput(StrictBaseModel):
     @classmethod
     def validate_top_rtl_path(cls, v: Optional[str]) -> Optional[str]:
         return _validate_optional_non_empty_str(v, "GenNodeOutput.top_rtl_path")
+
+    @field_validator("hardware_graph_path", "hardware_graph_mermaid_path")
+    @classmethod
+    def validate_optional_graph_path(cls, v: Optional[str], info) -> Optional[str]:
+        return _validate_optional_non_empty_str(v, f"GenNodeOutput.{info.field_name}")
 
     @model_validator(mode="after")
     def normalize_rtl_paths(self) -> "GenNodeOutput":

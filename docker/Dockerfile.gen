@@ -4,7 +4,7 @@ FROM python:3.11-slim-bullseye
 # 1. 设置基础环境与 Verible 版本变量 
 ENV PYTHONDONTWRITEBYTECODE=1 \
 	PYTHONUNBUFFERED=1 \
-	PYTHONPATH=/app \
+	PYTHONPATH=/ICU-MUJICA \
 	VERIBLE_VERSION=v0.0-4053-g89d4d98a
 
 # 2. 安装系统工具
@@ -16,8 +16,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 	&& rm -rf /var/lib/apt/lists/*
 
 # 3. 设置工作目录与共享空间
-WORKDIR /app
-RUN mkdir -p /app/shared_workspace /app/src && chmod -R 777 /app
+WORKDIR /ICU-MUJICA
+RUN mkdir -p /ICU-MUJICA/shared_workspace /ICU-MUJICA/output /ICU-MUJICA/src && chmod -R 777 /ICU-MUJICA
 
 # 4. 安装 Python 依赖
 COPY requirements.txt .
@@ -31,9 +31,9 @@ RUN chmod -R a+rX /usr/local/lib/python3.11/site-packages
 RUN chmod -R a+rx /usr/local/bin/
 
 # 7. 拷贝生成逻辑
-COPY ./src /app/src
+COPY ./src /ICU-MUJICA/src
 
 # 8. 启动 FastAPI 服务 (Gen 接口)
-WORKDIR /app
-ENV PYTHONPATH=/app
+WORKDIR /ICU-MUJICA
+ENV PYTHONPATH=/ICU-MUJICA
 CMD ["uvicorn", "src.generator.main:app", "--host", "0.0.0.0", "--port", "8000"]

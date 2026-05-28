@@ -1,0 +1,19 @@
+Generate RTL that strictly implements this SpecReg contract.
+Do not change the module name, port names, port directions, or widths.
+Use Verilog-2001 only. Do not emit newer-HDL constructs such as logic, always_ff, always_comb, typedef, enum, struct, interface, package, or import.
+Use active-low asynchronous reset when reset_type is async_low.
+
+Required module name: {{ module_name }}
+Required Module header, copy exactly:
+```verilog
+{{ module_header }}
+```
+
+Port contract strings:
+{{ port_contracts_json }}
+
+UserTaskSpec:
+{{ user_task_spec_json }}
+
+SpecReg:
+{{ spec_reg_json }}{{ retry_context }}

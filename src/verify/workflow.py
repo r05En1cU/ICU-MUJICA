@@ -9,8 +9,10 @@ from pathlib import Path
 from typing import Annotated, Any, Dict, List, Optional, TypedDict
 
 import httpx
+from jinja2 import Environment, FileSystemLoader, StrictUndefined
 from langgraph.graph import END, START, StateGraph
 
+from src.common.llm_safety import sanitize_llm_message, strip_visible_cot
 from src.common.models import (
     ArtifactSourceStage,
     CompileError,
@@ -24,6 +26,18 @@ from src.common.models import (
     VerifyTaskPayload,
     VerifyVerdict,
 )
+
+
+PROMPT_ENV = Environment(
+    loader=FileSystemLoader(str(Path(__file__).with_name("prompts"))),
+    undefined=StrictUndefined,
+    trim_blocks=True,
+    lstrip_blocks=True,
+)
+
+
+def _render_template(template_name: str, **context: Any) -> str:
+    return PROMPT_ENV.get_template(template_name).render(**context).strip()
 
 
 class VerifyWorkflowState(TypedDict):
@@ -77,17 +91,12 @@ def _build_system_messages(task_payload: VerifyTaskPayload) -> List[Dict[str, st
     """
     task = task_payload.task
 
-    system_prompt = f"""You are an expert RTL verification assistant.
-Your task is to validate generated RTL against SpecReg contract and produce a structured VerifyRpt.
-
-Task ID: {task.task_id}
-Top module: {task.top_module}
-Intent: {task.intent}
-Iteration: {task.iteration}
-
-Spec file path: {task_payload.spec_file_path}
-RTL path: {task_payload.rtl_path}
-"""
+    system_prompt = _render_template(
+        "context_system.j2",
+        task=task,
+        spec_file_path=task_payload.spec_file_path,
+        rtl_path=task_payload.rtl_path,
+    )
     return [{"role": "system", "content": system_prompt}]
 
 
@@ -115,6 +124,8 @@ def _call_openai_compatible_chat(
         "temperature": 0.1,
         "stream": False,
     }
+    if llm_config.reasoning_effort is not None:
+        payload["reasoning_effort"] = llm_config.reasoning_effort
     headers = {
         "Authorization": f"Bearer {llm_config.api_key.get_secret_value()}",
         "Content-Type": "application/json",
@@ -126,7 +137,7 @@ def _call_openai_compatible_chat(
 
     response_payload = response.json()
     try:
-        content = response_payload["choices"][0]["message"]["content"]
+        content = strip_visible_cot(response_payload["choices"][0]["message"]["content"])
     except (KeyError, IndexError, TypeError) as exc:
         raise ValueError("LLM response is not OpenAI chat-completions compatible") from exc
 
@@ -143,10 +154,7 @@ def _call_openai_compatible_chat(
         sanitized_choices.append(
             {
                 "index": response_choice.get("index"),
-                "message": {
-                    "role": message.get("role"),
-                    "content": message.get("content"),
-                },
+                "message": sanitize_llm_message(message),
                 "finish_reason": response_choice.get("finish_reason"),
             }
         )
@@ -156,6 +164,7 @@ def _call_openai_compatible_chat(
             "messages": messages,
             "temperature": payload["temperature"],
             "stream": payload["stream"],
+            "reasoning_effort": payload.get("reasoning_effort"),
         },
         "response": {
             "id": response_payload.get("id"),
@@ -175,6 +184,25 @@ def _summarize_rtl_for_prompt(rtl_text: Optional[str], max_chars: int = 6000) ->
     return rtl_text[:max_chars] + "\n... [truncated]"
 
 
+def _port_contracts_for_prompt(spec_reg: Optional[SpecReg]) -> str:
+    if spec_reg is None:
+        return "unavailable"
+    return json.dumps(
+        [
+            {
+                "name": port.name,
+                "direction": port.direction.value,
+                "net_type": port.net_type.value,
+                "width": port.width,
+                "declaration": port.verilog_declaration,
+            }
+            for port in spec_reg.ports
+        ],
+        indent=2,
+        ensure_ascii=False,
+    )
+
+
 def _build_diagnostic_messages(state: VerifyWorkflowState, verify_rpt: VerifyRpt) -> List[Dict[str, str]]:
     spec_reg = state.get("spec_reg")
     rtl_text = state.get("rtl_text")
@@ -183,13 +211,13 @@ def _build_diagnostic_messages(state: VerifyWorkflowState, verify_rpt: VerifyRpt
     if compile_log_path is not None and Path(compile_log_path).exists():
         compile_log = Path(compile_log_path).read_text(encoding="utf-8")[:6000]
 
-    user_content = (
-        "Analyze this deterministic verification failure and provide a concise repair suggestion. "
-        "Do not change the verdict. Focus on what the Generator should fix next.\n\n"
-        f"VerifyRpt:\n{verify_rpt.model_dump_json(indent=2)}\n\n"
-        f"SpecReg:\n{spec_reg.model_dump_json(indent=2) if spec_reg is not None else 'unavailable'}\n\n"
-        f"RTL excerpt:\n{_summarize_rtl_for_prompt(rtl_text)}\n\n"
-        f"Compile log excerpt:\n{compile_log or 'unavailable'}"
+    user_content = _render_template(
+        "diagnostic_user.j2",
+        verify_rpt_json=verify_rpt.model_dump_json(indent=2),
+        spec_reg_json=spec_reg.model_dump_json(indent=2) if spec_reg is not None else "unavailable",
+        port_contracts_json=_port_contracts_for_prompt(spec_reg),
+        rtl_excerpt=_summarize_rtl_for_prompt(rtl_text),
+        compile_log_excerpt=compile_log or "unavailable",
     )
     return state.get("messages", []) + [{"role": "user", "content": user_content}]
 
@@ -322,7 +350,7 @@ def _extract_declared_ports(rtl_text: str, top_module: str) -> Dict[str, RtlPort
 
         match = re.match(
             r"^(?:(input|output|inout)\b)?\s*"
-            r"(?:(wire|reg|logic)\b)?\s*"
+            r"(?:(wire|reg)\b)?\s*"
             r"(\[[^\]]+\])?\s*"
             r"([A-Za-z_][A-Za-z0-9_$]*)$",
             item,
@@ -379,7 +407,7 @@ def _check_semantic_contract(spec_reg: SpecReg, rtl_text: str) -> List[PortMisma
         )
         return mismatches
 
-    for node in spec_reg.instance_nodes():
+    for node in spec_reg.module_nodes():
         if node.module_name and f"module {node.module_name}" not in rtl_text:
             mismatches.append(
                 PortMismatch(

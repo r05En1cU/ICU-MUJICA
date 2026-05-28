@@ -3,12 +3,16 @@ from __future__ import annotations
 import operator
 import json
 import re
+import time
 from pathlib import Path
 from typing import Annotated, Any, Dict, List, Optional, TypedDict
 
 import httpx
+from jinja2 import Environment, FileSystemLoader, StrictUndefined
 from langgraph.graph import END, START, StateGraph
+from pydantic import ValidationError
 
+from src.common.llm_safety import sanitize_llm_message, strip_visible_cot
 from src.common.models import (
     ArtifactSourceStage,
     ClockResetDef,
@@ -27,6 +31,18 @@ from src.common.models import (
     VerifyRpt,
     WorkTaskPayload,
 )
+
+
+PROMPT_ENV = Environment(
+    loader=FileSystemLoader(str(Path(__file__).with_name("prompts"))),
+    undefined=StrictUndefined,
+    trim_blocks=True,
+    lstrip_blocks=True,
+)
+
+
+def _render_template(template_name: str, **context: Any) -> str:
+    return PROMPT_ENV.get_template(template_name).render(**context).strip()
 
 
 class GenWorkflowState(TypedDict):
@@ -117,19 +133,12 @@ def _build_system_messages(
     """
     messages: List[Dict[str, str]] = []
 
-    system_prompt = f"""You are an expert RTL architect and coding assistant.
-Your task is to generate a correct SpecReg and Verilog RTL implementation.
-
-Top module: {task.top_module}
-Intent: {task.intent}
-Iteration: {task.iteration}
-
-Refined requirements:
-{user_task_spec.refined_requirements}
-
-Design rules:
-{user_task_spec.design_rules}
-"""
+    system_prompt = _render_template(
+        "context_system.j2",
+        task=task,
+        refined_requirements_json=json.dumps(user_task_spec.refined_requirements, indent=2, ensure_ascii=False),
+        design_rules_json=json.dumps(user_task_spec.design_rules, indent=2, ensure_ascii=False),
+    )
     messages.append({"role": "system", "content": system_prompt})
 
     if previous_spec_reg is not None:
@@ -201,6 +210,7 @@ def _derive_ports_from_task_spec(task: WorkTaskPayload, user_task_spec: UserTask
         PortDef(
             name="o_done",
             direction=PortDirection.OUTPUT,
+            net_type=PortType.REG,
             width="1",
             clock_domain="i_clk",
             description="Done flag output",
@@ -356,10 +366,9 @@ def _build_multi_file_spec_reg(task: WorkTaskPayload, user_task_spec: UserTaskSp
         nodes=[
             RtlNode(
                 node_id="u_control",
-                node_type=NodeType.INSTANCE,
+                node_type=NodeType.MODULE,
                 module_name=control_module,
                 file_name=f"{control_module}.v",
-                instance_name="u_control",
                 parent_node_id="TOP",
                 description="Control submodule that raises valid after reset",
                 implementation_hint="Generate a reset-safe sequential valid flag",
@@ -367,10 +376,9 @@ def _build_multi_file_spec_reg(task: WorkTaskPayload, user_task_spec: UserTaskSp
             ),
             RtlNode(
                 node_id="u_datapath",
-                node_type=NodeType.INSTANCE,
+                node_type=NodeType.MODULE,
                 module_name=datapath_module,
                 file_name=f"{datapath_module}.v",
-                instance_name="u_datapath",
                 parent_node_id="TOP",
                 description="Datapath submodule that registers input data",
                 implementation_hint="Generate an 8-bit reset-safe register datapath",
@@ -546,6 +554,108 @@ def _emit_verilog_from_spec(spec_reg: SpecReg) -> str:
     )
 
 
+def _mermaid_id(value: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9_]", "_", value)
+    if not normalized or normalized[0].isdigit():
+        normalized = f"n_{normalized}"
+    return normalized
+
+
+def _mermaid_label(value: str) -> str:
+    return value.replace('"', "'").replace("\n", "<br/>")
+
+
+def _spec_reg_to_hardware_graph(spec_reg: SpecReg) -> Dict[str, Any]:
+    top_id = "TOP"
+    graph_nodes: List[Dict[str, Any]] = [
+        {
+            "id": top_id,
+            "kind": "top",
+            "label": f"TOP: {spec_reg.top_module}",
+            "module_name": spec_reg.top_module,
+        }
+    ]
+    graph_edges: List[Dict[str, Any]] = []
+
+    for port in spec_reg.ports:
+        port_id = _mermaid_id(f"port_{port.name}")
+        graph_nodes.append(
+            {
+                "id": port_id,
+                "kind": "port",
+                "name": port.name,
+                "direction": port.direction.value,
+                "width": port.width,
+                "clock_domain": port.clock_domain,
+                "is_clock": port.is_clock,
+                "is_reset": port.is_reset,
+                "label": f"{port.direction.value} {port.name}[{port.width}]",
+            }
+        )
+        graph_edges.append(
+            {
+                "source": port_id if port.direction == PortDirection.INPUT else top_id,
+                "target": top_id if port.direction == PortDirection.INPUT else port_id,
+                "signal": port.name,
+                "width": port.width,
+                "kind": "top_port",
+            }
+        )
+
+    for node in spec_reg.nodes:
+        graph_nodes.append(
+            {
+                "id": _mermaid_id(node.node_id),
+                "kind": node.node_type.value,
+                "node_id": node.node_id,
+                "module_name": node.module_name,
+                "file_name": node.file_name,
+                "parent_node_id": node.parent_node_id,
+                "is_rtl_file": node.is_rtl_file,
+                "label": node.module_name or node.node_id,
+                "description": node.description,
+            }
+        )
+
+    for edge in spec_reg.edges:
+        graph_edges.append(
+            {
+                "source": top_id if edge.source.node_id == "TOP" else _mermaid_id(edge.source.node_id),
+                "target": top_id if edge.target.node_id == "TOP" else _mermaid_id(edge.target.node_id),
+                "signal": edge.signal_name,
+                "width": edge.width,
+                "source_port": edge.source.port_name,
+                "target_port": edge.target.port_name,
+                "kind": "rtl_edge",
+                "description": edge.description,
+            }
+        )
+
+    mermaid_lines = ["flowchart LR"]
+    for node in graph_nodes:
+        node_id = _mermaid_id(str(node["id"]))
+        label = _mermaid_label(str(node.get("label") or node_id))
+        if node.get("kind") == "port":
+            mermaid_lines.append(f'    {node_id}(("{label}"))')
+        else:
+            mermaid_lines.append(f'    {node_id}["{label}"]')
+
+    for edge in graph_edges:
+        source = _mermaid_id(str(edge["source"]))
+        target = _mermaid_id(str(edge["target"]))
+        signal = _mermaid_label(f"{edge.get('signal', '')}[{edge.get('width', '1')}]")
+        mermaid_lines.append(f'    {source} -->|"{signal}"| {target}')
+
+    return {
+        "task_id": spec_reg.task_id,
+        "iteration": spec_reg.iteration,
+        "top_module": spec_reg.top_module,
+        "nodes": graph_nodes,
+        "edges": graph_edges,
+        "mermaid": "\n".join(mermaid_lines) + "\n",
+    }
+
+
 def _has_injection_directive(spec_reg: SpecReg) -> bool:
     requirements_text = "\n".join(spec_reg.functional_requirements)
     return "AGVS4RTL_INJECT_" in requirements_text
@@ -568,8 +678,219 @@ def _chat_completions_url(base_url: str) -> str:
     return f"{normalized}/chat/completions"
 
 
+def _port_contract_from_port(port: PortDef) -> Dict[str, str]:
+    return {
+        "name": port.name,
+        "direction": port.direction.value,
+        "net_type": port.net_type.value,
+        "width": port.width,
+        "declaration": port.verilog_declaration,
+    }
+
+
+def _build_port_contract(name: str, direction: PortDirection, net_type: PortType, width: str) -> Dict[str, str]:
+    port = PortDef(name=name, direction=direction, net_type=net_type, width=width)
+    return _port_contract_from_port(port)
+
+
+def _top_port_contracts(spec_reg: SpecReg) -> List[Dict[str, str]]:
+    return [_port_contract_from_port(port) for port in spec_reg.ports]
+
+
+def _append_port_contract(
+    contracts: List[Dict[str, str]],
+    seen_names: set[str],
+    name: str,
+    direction: PortDirection,
+    net_type: PortType,
+    width: str,
+) -> None:
+    if name in seen_names:
+        return
+    contracts.append(_build_port_contract(name, direction, net_type, width))
+    seen_names.add(name)
+
+
+def _merge_port_direction(current: PortDirection, incoming: PortDirection) -> PortDirection:
+    if current == incoming:
+        return current
+    return PortDirection.INOUT
+
+
+def _merge_port_net_type(direction: PortDirection) -> PortType:
+    if direction == PortDirection.OUTPUT:
+        return PortType.REG
+    return PortType.WIRE
+
+
+def _child_port_contracts(spec_reg: SpecReg, node: RtlNode) -> List[Dict[str, str]]:
+    port_info: Dict[str, Dict[str, Any]] = {}
+    for edge in spec_reg.edges:
+        if edge.target.node_id == node.node_id:
+            existing = port_info.get(edge.target.port_name)
+            direction = PortDirection.INPUT
+            if existing is not None:
+                direction = _merge_port_direction(existing["direction"], direction)
+            port_info[edge.target.port_name] = {"direction": direction, "width": edge.width}
+        if edge.source.node_id == node.node_id:
+            existing = port_info.get(edge.source.port_name)
+            direction = PortDirection.OUTPUT
+            if existing is not None:
+                direction = _merge_port_direction(existing["direction"], direction)
+            port_info[edge.source.port_name] = {"direction": direction, "width": edge.width}
+
+    return [
+        _build_port_contract(
+            name=port_name,
+            direction=info["direction"],
+            net_type=_merge_port_net_type(info["direction"]),
+            width=info["width"],
+        )
+        for port_name, info in port_info.items()
+    ]
+
+
+def _file_port_contracts(spec_reg: SpecReg, file_plan: Dict[str, Any]) -> List[Dict[str, str]]:
+    node = file_plan.get("node")
+    if node is None:
+        return _top_port_contracts(spec_reg)
+    return _child_port_contracts(spec_reg, node)
+
+
+def _module_header(module_name: str, port_contracts: List[Dict[str, str]]) -> str:
+    if not port_contracts:
+        return f"module {module_name} ();"
+
+    lines = []
+    for index, contract in enumerate(port_contracts):
+        suffix = "," if index < len(port_contracts) - 1 else ""
+        lines.append(f"    {contract['declaration']}{suffix}")
+    return f"module {module_name} (\n" + "\n".join(lines) + "\n);"
+
+
+def _verilog_range(width: str) -> str:
+    width_text = str(width).strip()
+    if width_text == "1":
+        return ""
+    if re.fullmatch(r"\d+", width_text):
+        return f"[{int(width_text) - 1}:0] "
+    if width_text.startswith("[") and width_text.endswith("]"):
+        return f"{width_text} "
+    return f"[{width_text}-1:0] "
+
+
+def _signal_declaration(name: str, width: str) -> str:
+    return f"wire {_verilog_range(width)}{name};".replace("wire  ", "wire ")
+
+
+def _top_connection_signal(edge: RtlEdge) -> str:
+    if edge.source.node_id == "TOP":
+        return edge.source.port_name
+    if edge.target.node_id == "TOP":
+        return edge.target.port_name
+    return edge.signal_name
+
+
+def _elaborate_top_skeleton(spec_reg: SpecReg, planned_files: List[Dict[str, Any]]) -> str:
+    module_header = _module_header(spec_reg.top_module, _top_port_contracts(spec_reg))
+    child_plans = [plan for plan in planned_files if plan.get("node") is not None]
+    if not child_plans:
+        return module_header + "\n\nendmodule\n"
+
+    internal_signals: Dict[str, str] = {}
+    child_connections: Dict[str, Dict[str, str]] = {}
+    for plan in child_plans:
+        child_connections[str(plan["module_name"])] = {}
+
+    node_to_module = {
+        str(plan["node"].node_id): str(plan["module_name"])
+        for plan in child_plans
+        if plan.get("node") is not None
+    }
+
+    for edge in spec_reg.edges:
+        signal_name = _top_connection_signal(edge)
+        if edge.source.node_id != "TOP" and edge.target.node_id != "TOP":
+            internal_signals.setdefault(signal_name, edge.width)
+
+        if edge.source.node_id != "TOP" and edge.source.node_id in node_to_module:
+            child_connections[node_to_module[edge.source.node_id]][edge.source.port_name] = signal_name
+        if edge.target.node_id != "TOP" and edge.target.node_id in node_to_module:
+            child_connections[node_to_module[edge.target.node_id]][edge.target.port_name] = signal_name
+
+    lines = [module_header, ""]
+    if internal_signals:
+        lines.append("    // Graph-derived internal wires")
+        for signal_name, width in internal_signals.items():
+            lines.append(f"    {_signal_declaration(signal_name, width)}")
+        lines.append("")
+
+    for plan in child_plans:
+        module_name = str(plan["module_name"])
+        instance_name = f"u_{module_name}"
+        port_contracts = _file_port_contracts(spec_reg, plan)
+        connections = child_connections.get(module_name, {})
+        lines.append(f"    {module_name} {instance_name} (")
+        for index, contract in enumerate(port_contracts):
+            port_name = contract["name"]
+            signal_name = connections.get(port_name, port_name)
+            suffix = "," if index < len(port_contracts) - 1 else ""
+            lines.append(f"        .{port_name}({signal_name}){suffix}")
+        lines.append("    );")
+        lines.append("")
+
+    lines.append("endmodule")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _declaration_line_names(line: str) -> List[str]:
+    stripped = line.strip()
+    if not stripped.endswith(";"):
+        return []
+    if re.match(r"^(input|output|inout|wire|reg|logic)\b", stripped) is None:
+        return []
+
+    body = re.sub(r"//.*$", "", stripped[:-1])
+    body = re.sub(r"\[[^\]]+\]", " ", body)
+    body = re.sub(r"\b(input|output|inout|wire|reg|logic|signed|unsigned)\b", " ", body)
+    body = re.sub(r"=\s*[^,]+", "", body)
+
+    names = []
+    for item in body.split(","):
+        match = re.search(r"([A-Za-z_][A-Za-z0-9_$]*)\s*$", item.strip())
+        if match:
+            names.append(match.group(1))
+    return names
+
+
+def _strip_redundant_port_declarations(rtl_code: str, port_names: set[str]) -> str:
+    lines = []
+    for line in rtl_code.splitlines():
+        declared_names = _declaration_line_names(line)
+        if declared_names and set(declared_names).issubset(port_names):
+            continue
+        lines.append(line)
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _normalize_module_framework(
+    rtl_code: str,
+    module_name: str,
+    port_contracts: List[Dict[str, str]],
+) -> str:
+    header = _module_header(module_name, port_contracts)
+    pattern = rf"\bmodule\s+{re.escape(module_name)}\s*(?:#\s*\(.*?\)\s*)?\(.*?\)\s*;"
+    normalized, replacement_count = re.subn(pattern, header, rtl_code, count=1, flags=re.DOTALL)
+    if replacement_count != 1:
+        raise ValueError(f"failed to normalize module header for {module_name}")
+    return _strip_redundant_port_declarations(
+        normalized,
+        {contract["name"] for contract in port_contracts},
+    )
+
+
 def _extract_verilog_code(content: str) -> str:
-    fence_match = re.search(r"```(?:systemverilog|verilog|sv)?\s*(.*?)```", content, re.IGNORECASE | re.DOTALL)
+    fence_match = re.search(r"```(?:verilog)?\s*(.*?)```", content, re.IGNORECASE | re.DOTALL)
     if fence_match is not None:
         content = fence_match.group(1)
 
@@ -663,21 +984,354 @@ def _generated_file_context(rtl_files: Dict[str, str]) -> str:
     return "\n\n".join(sections)
 
 
-def _extract_json_object(content: str) -> Dict[str, Any]:
+def _extract_json_fragment(content: str) -> tuple[str, int]:
     fence_match = re.search(r"```(?:json)?\s*(.*?)```", content, re.IGNORECASE | re.DOTALL)
     if fence_match is not None:
-        content = fence_match.group(1)
+        fenced_content = fence_match.group(1)
+        fenced_offset = fence_match.start(1)
+        leading_trimmed = len(fenced_content) - len(fenced_content.lstrip())
+        json_text = fenced_content.strip()
+        base_line = content[:fenced_offset + leading_trimmed].count("\n") + 1
+        return json_text, base_line
 
-    content = content.strip()
     start = content.find("{")
     end = content.rfind("}")
     if start < 0 or end < start:
         raise ValueError("LLM architect response does not contain a JSON object")
+    return content[start:end + 1], content[:start].count("\n") + 1
 
-    parsed = json.loads(content[start:end + 1])
+
+def _extract_json_object(content: str) -> Dict[str, Any]:
+    json_text, _ = _extract_json_fragment(content)
+
+    parsed = json.loads(json_text)
     if not isinstance(parsed, dict):
         raise ValueError("LLM architect response JSON is not an object")
     return parsed
+
+
+def _loc_to_path(location: tuple[Any, ...]) -> str:
+    path = ""
+    for part in location:
+        if isinstance(part, int):
+            path += f"[{part}]"
+        else:
+            path += f".{part}" if path else str(part)
+    return path or "<root>"
+
+
+def _line_for_json_path(json_text: str, location: tuple[Any, ...], base_line: int) -> Optional[int]:
+    if not location:
+        return base_line
+
+    search_start = 0
+    previous_key = None
+    for part in location:
+        if isinstance(part, str):
+            pattern = re.compile(rf'"{re.escape(part)}"\s*:')
+            match = pattern.search(json_text, search_start)
+            if match is None:
+                break
+            search_start = match.end()
+            previous_key = part
+            continue
+        if isinstance(part, int) and previous_key is not None:
+            cursor = search_start
+            for _ in range(part + 1):
+                match = re.search(r"\{", json_text[cursor:])
+                if match is None:
+                    break
+                cursor += match.start() + 1
+            else:
+                search_start = cursor
+
+    key_candidates = [part for part in reversed(location) if isinstance(part, str)]
+    for key in key_candidates:
+        pattern = re.compile(rf'"{re.escape(key)}"\s*:')
+        match = pattern.search(json_text, search_start)
+        if match is not None:
+            return base_line + json_text[:match.start()].count("\n")
+
+    for key in key_candidates:
+        pattern = re.compile(rf'"{re.escape(key)}"\s*:')
+        match = pattern.search(json_text)
+        if match is not None:
+            return base_line + json_text[:match.start()].count("\n")
+    return None
+
+
+def _summarize_architect_error(exc: Exception, json_text: str, base_line: int, max_items: int = 8) -> Dict[str, Any]:
+    if isinstance(exc, ValidationError):
+        issues = []
+        for error in exc.errors()[:max_items]:
+            location = tuple(error.get("loc", ()))
+            issues.append(
+                {
+                    "path": _loc_to_path(location),
+                    "line": _line_for_json_path(json_text, location, base_line),
+                    "type": error.get("type"),
+                    "message": error.get("msg"),
+                }
+            )
+        return {
+            "kind": "pydantic_validation_error",
+            "total_errors": len(exc.errors()),
+            "shown_errors": len(issues),
+            "issues": issues,
+        }
+    return {
+        "kind": exc.__class__.__name__,
+        "message": str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__,
+        "line": base_line,
+    }
+
+
+def _format_architect_retry_feedback(
+    error_summary: Dict[str, Any],
+    repair_frame_path: str,
+    repair_frame: Dict[str, Any],
+) -> str:
+    return _render_template(
+        "architect_retry_user.j2",
+        error_summary_json=json.dumps(error_summary, indent=2, ensure_ascii=False),
+        repair_frame_path=repair_frame_path,
+        repair_frame_json=json.dumps(repair_frame, indent=2, ensure_ascii=False),
+    )
+
+
+SPEC_REG_TOP_LEVEL_FIELDS = [
+    "task_id",
+    "iteration",
+    "refactor_label",
+    "intent",
+    "top_module",
+    "source_stage",
+    "module_description",
+    "parameters",
+    "ports",
+    "clock_and_reset",
+    "protocols",
+    "verification_directives",
+    "functional_requirements",
+    "corner_cases",
+    "illegal_conditions",
+    "latency_notes",
+    "nodes",
+    "edges",
+]
+
+
+def _top_level_error_fields(exc: Exception) -> set[str]:
+    if not isinstance(exc, ValidationError):
+        return set(SPEC_REG_TOP_LEVEL_FIELDS)
+    fields = set()
+    for error in exc.errors():
+        location = tuple(error.get("loc", ()))
+        if location and isinstance(location[0], str):
+            fields.add(location[0])
+    return fields or set(SPEC_REG_TOP_LEVEL_FIELDS)
+
+
+def _empty_spec_reg_payload(task: WorkTaskPayload, user_task_spec: UserTaskSpec) -> Dict[str, Any]:
+    return {
+        "task_id": task.task_id,
+        "iteration": task.iteration,
+        "refactor_label": "NONE",
+        "intent": task.intent.value,
+        "top_module": task.top_module,
+        "source_stage": ArtifactSourceStage.ARCHITECT.value,
+        "module_description": "",
+        "parameters": [],
+        "ports": [],
+        "clock_and_reset": [],
+        "protocols": [],
+        "verification_directives": [],
+        "functional_requirements": list(user_task_spec.refined_requirements),
+        "corner_cases": [],
+        "illegal_conditions": [],
+        "latency_notes": [],
+        "nodes": [],
+        "edges": [],
+    }
+
+
+def _target_field_shape(field_name: str) -> Any:
+    shapes: Dict[str, Any] = {
+        "module_description": "Describe the module behavior in one non-empty string.",
+        "parameters": [
+            {
+                "name": "UPPER_CASE_PARAMETER",
+                "default_value": "1",
+                "description": "Parameter purpose.",
+            }
+        ],
+        "ports": [
+            {
+                "name": "i_signal",
+                "direction": "input",
+                "net_type": "wire",
+                "width": "1",
+                "clock_domain": None,
+                "is_clock": False,
+                "is_reset": False,
+                "description": "Port purpose.",
+            }
+        ],
+        "clock_and_reset": [
+            {
+                "clock_name": "i_clk",
+                "reset_name": "i_rst_n",
+                "reset_type": "async_low",
+            }
+        ],
+        "protocols": [
+            {
+                "protocol_type": "custom",
+                "role": "endpoint",
+                "port_mapping": {"logical_signal": "physical_port_name"},
+                "description": "Protocol role and behavior.",
+            }
+        ],
+        "verification_directives": ["One verification directive per string."],
+        "functional_requirements": ["One functional requirement per string."],
+        "corner_cases": ["One corner case per string."],
+        "illegal_conditions": ["One illegal condition per string."],
+        "latency_notes": ["One latency note per string."],
+        "nodes": [
+            {
+                "node_id": "u_block",
+                "node_type": "module",
+                "module_name": "block_module",
+                "file_name": "block_module.v",
+                "parent_node_id": "TOP",
+                "description": "Reusable RTL module node.",
+                "implementation_hint": "How to implement this module.",
+                "is_pure_comb_logic": False,
+                "is_rtl_file": True,
+            },
+            {
+                "node_id": "comb_block",
+                "node_type": "combinational",
+                "module_name": None,
+                "file_name": None,
+                "parent_node_id": None,
+                "description": "Internal pure combinational logic.",
+                "implementation_hint": None,
+                "is_pure_comb_logic": True,
+                "is_rtl_file": False,
+            },
+            {
+                "node_id": "seq_block",
+                "node_type": "sequential",
+                "module_name": None,
+                "file_name": None,
+                "parent_node_id": None,
+                "description": "Internal stateful logic.",
+                "implementation_hint": None,
+                "is_pure_comb_logic": False,
+                "is_rtl_file": False,
+            },
+        ],
+        "edges": [
+            {
+                "source": {"node_id": "TOP", "port_name": "i_signal"},
+                "target": {"node_id": "u_block", "port_name": "i_signal"},
+                "signal_name": "i_signal",
+                "width": "1",
+                "description": "Connection purpose.",
+            }
+        ],
+    }
+    return shapes.get(field_name, "Use the exact SpecReg schema value for this field.")
+
+
+def _build_architect_repair_frame(
+    task: WorkTaskPayload,
+    user_task_spec: UserTaskSpec,
+    spec_payload: Optional[Dict[str, Any]],
+    exc: Exception,
+    error_summary: Dict[str, Any],
+) -> Dict[str, Any]:
+    base_payload = _empty_spec_reg_payload(task, user_task_spec)
+    if isinstance(spec_payload, dict):
+        for field_name in SPEC_REG_TOP_LEVEL_FIELDS:
+            if field_name in spec_payload:
+                base_payload[field_name] = spec_payload[field_name]
+
+    failed_fields = _top_level_error_fields(exc)
+    accepted_fields = {
+        field_name: base_payload[field_name]
+        for field_name in SPEC_REG_TOP_LEVEL_FIELDS
+        if field_name not in failed_fields and field_name in base_payload
+    }
+    fields_to_regenerate = {
+        field_name: _target_field_shape(field_name)
+        for field_name in SPEC_REG_TOP_LEVEL_FIELDS
+        if field_name in failed_fields
+    }
+    output_frame = {
+        field_name: fields_to_regenerate.get(field_name, accepted_fields.get(field_name, base_payload.get(field_name)))
+        for field_name in SPEC_REG_TOP_LEVEL_FIELDS
+    }
+
+    return {
+        "role": "architect_repair_frame",
+        "instructions": [
+            "Use accepted_spec_reg_fields as fixed context unless a correction is required for consistency.",
+            "Regenerate every field listed in fields_to_regenerate using the target shape shown there.",
+            "Return only the complete SpecReg JSON object, not this wrapper.",
+        ],
+        "failed_fields": sorted(failed_fields),
+        "error_summary": error_summary,
+        "accepted_spec_reg_fields": accepted_fields,
+        "fields_to_regenerate": fields_to_regenerate,
+        "complete_spec_reg_output_frame": output_frame,
+    }
+
+
+def _write_architect_repair_frame(task: WorkTaskPayload, attempt_number: int, repair_frame: Dict[str, Any]) -> str:
+    llm_dir = Path(task.shared_task_dir) / "llm"
+    llm_dir.mkdir(parents=True, exist_ok=True)
+    repair_frame_path = llm_dir / f"ArchitectRepairFrame_iter{task.iteration}_attempt{attempt_number}.json"
+    repair_frame_path.write_text(json.dumps(repair_frame, indent=2, ensure_ascii=False), encoding="utf-8")
+    return str(repair_frame_path)
+
+
+def _write_architect_failure_artifact(
+    task: WorkTaskPayload,
+    exc: Exception,
+    architect_attempts: List[Dict[str, Any]],
+    architect_error_summary: Optional[Dict[str, Any]],
+) -> str:
+    errors_dir = Path(task.shared_task_dir) / "errors"
+    errors_dir.mkdir(parents=True, exist_ok=True)
+    failure_path = errors_dir / f"ArchitectFailure_iter{task.iteration}.json"
+    failure_payload = {
+        "task_id": task.task_id,
+        "iteration": task.iteration,
+        "top_module": task.top_module,
+        "stage": "architect",
+        "error": str(exc),
+        "error_summary": architect_error_summary,
+        "attempts": architect_attempts,
+        "repair_frame_paths": [
+            attempt.get("repair_frame_path")
+            for attempt in architect_attempts
+            if attempt.get("repair_frame_path")
+        ],
+    }
+    failure_path.write_text(json.dumps(failure_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return str(failure_path)
+
+
+class ArchitectSpecRegFailure(RuntimeError):
+    def __init__(self, failure_artifact_path: str, original_error: Exception):
+        super().__init__(
+            "architect SpecReg generation failed after retries; "
+            f"diagnostic artifact written to {failure_artifact_path}: {original_error}"
+        )
+        self.failure_artifact_path = failure_artifact_path
+        self.original_error = original_error
 
 
 def _ensure_text_list(value: Any) -> List[str]:
@@ -749,8 +1403,8 @@ def _normalize_architect_spec_payload(spec_payload: Dict[str, Any]) -> Dict[str,
         if not node_id:
             continue
         node_type = node.get("node_type") or node.get("type") or "combinational"
-        if str(node_type).lower() in {"module", "submodule", "rtl_file", "rtl-file"}:
-            node_type = "instance"
+        if str(node_type).lower() in {"rtl_module", "rtl-module", "rtl module", "submodule", "rtl_file", "rtl-file"}:
+            node_type = "module"
         implementation_hint = node.get("implementation_hint")
         if isinstance(implementation_hint, str) and not implementation_hint.strip():
             implementation_hint = None
@@ -760,7 +1414,6 @@ def _normalize_architect_spec_payload(spec_payload: Dict[str, Any]) -> Dict[str,
                 "node_type": node_type,
                 "module_name": node.get("module_name"),
                 "file_name": node.get("file_name"),
-                "instance_name": node.get("instance_name"),
                 "parent_node_id": node.get("parent_node_id"),
                 "description": node.get("description", ""),
                 "implementation_hint": implementation_hint,
@@ -808,18 +1461,39 @@ def _call_openai_compatible_chat(
         "temperature": 0.1,
         "stream": False,
     }
+    if llm_config.reasoning_effort is not None:
+        payload["reasoning_effort"] = llm_config.reasoning_effort
     headers = {
         "Authorization": f"Bearer {llm_config.api_key.get_secret_value()}",
         "Content-Type": "application/json",
     }
 
-    with httpx.Client(timeout=120.0) as client:
-        response = client.post(_chat_completions_url(llm_config.base_url), json=payload, headers=headers)
-        response.raise_for_status()
+    transport_errors = (
+        httpx.ConnectError,
+        httpx.ConnectTimeout,
+        httpx.ReadError,
+        httpx.ReadTimeout,
+        httpx.RemoteProtocolError,
+    )
+    max_transport_attempts = 3
+    last_transport_error: Optional[Exception] = None
+    for transport_attempt in range(max_transport_attempts):
+        try:
+            with httpx.Client(timeout=120.0) as client:
+                response = client.post(_chat_completions_url(llm_config.base_url), json=payload, headers=headers)
+                response.raise_for_status()
+            break
+        except transport_errors as exc:
+            last_transport_error = exc
+            if transport_attempt == max_transport_attempts - 1:
+                raise
+            time.sleep(1.5 * (transport_attempt + 1))
+    else:
+        raise RuntimeError("LLM transport retry loop exited without a response") from last_transport_error
 
     response_payload = response.json()
     try:
-        content = response_payload["choices"][0]["message"]["content"]
+        content = strip_visible_cot(response_payload["choices"][0]["message"]["content"])
     except (KeyError, IndexError, TypeError) as exc:
         raise ValueError("LLM response is not OpenAI chat-completions compatible") from exc
 
@@ -836,10 +1510,7 @@ def _call_openai_compatible_chat(
         sanitized_choices.append(
             {
                 "index": response_choice.get("index"),
-                "message": {
-                    "role": message.get("role"),
-                    "content": message.get("content"),
-                },
+                "message": sanitize_llm_message(message),
                 "finish_reason": response_choice.get("finish_reason"),
             }
         )
@@ -849,6 +1520,7 @@ def _call_openai_compatible_chat(
             "messages": messages,
             "temperature": payload["temperature"],
             "stream": payload["stream"],
+            "reasoning_effort": payload.get("reasoning_effort"),
         },
         "response": {
             "id": response_payload.get("id"),
@@ -870,33 +1542,41 @@ def _emit_verilog_with_llm(
     if verify_rpt is not None:
         retry_context = "\nPrevious verification report:\n" + verify_rpt.model_dump_json(indent=2)
 
+    port_contracts = _top_port_contracts(spec_reg)
+    module_header = _module_header(spec_reg.top_module, port_contracts)
+
     messages = [
         {
             "role": "system",
-            "content": (
-                "You are an expert Verilog RTL engineer. Generate synthesizable Verilog-2001 only. "
-                "Return exactly one complete Verilog module and no explanation."
-            ),
+            "content": _render_template("coder_system.j2", multi_file=False),
         },
         {
             "role": "user",
-            "content": (
-                "Generate RTL that strictly implements this SpecReg contract. "
-                "Do not change the module name, port names, port directions, or widths. "
-                "Use active-low asynchronous reset when reset_type is async_low.\n\n"
-                f"UserTaskSpec:\n{user_task_spec.model_dump_json(indent=2)}\n\n"
-                f"SpecReg:\n{spec_reg.model_dump_json(indent=2)}"
-                f"{retry_context}"
+            "content": _render_template(
+                "single_rtl_user.j2",
+                module_name=spec_reg.top_module,
+                module_header=module_header,
+                port_contracts_json=json.dumps(port_contracts, indent=2, ensure_ascii=False),
+                user_task_spec_json=user_task_spec.model_dump_json(indent=2),
+                spec_reg_json=spec_reg.model_dump_json(indent=2),
+                retry_context=retry_context,
             ),
         },
     ]
 
     content, transcript = _call_openai_compatible_chat(llm_config, messages)
+    rtl_code = _normalize_module_framework(
+        _extract_verilog_code(content),
+        spec_reg.top_module,
+        port_contracts,
+    )
     transcript.update(
         {
             "stage": "coder",
             "profile": llm_config.profile,
-            "extracted_rtl": _extract_verilog_code(content),
+            "module_header": module_header,
+            "port_contracts": port_contracts,
+            "extracted_rtl": rtl_code,
         }
     )
     return transcript["extracted_rtl"], transcript
@@ -913,6 +1593,8 @@ def _emit_rtl_files_with_llm(
         retry_context = "\nPrevious verification report:\n" + verify_rpt.model_dump_json(indent=2)
 
     planned_files = _planned_rtl_files(spec_reg)
+    top_file_name = f"{spec_reg.top_module}.v"
+    top_skeleton = _elaborate_top_skeleton(spec_reg, planned_files)
     rtl_files: Dict[str, str] = {}
     transcripts: List[Dict[str, Any]] = []
 
@@ -921,6 +1603,27 @@ def _emit_rtl_files_with_llm(
         module_name = str(file_plan["module_name"])
         node = file_plan["node"]
         role = str(file_plan["role"])
+        port_contracts = _file_port_contracts(spec_reg, file_plan)
+        module_header = _module_header(module_name, port_contracts)
+
+        if role == "top":
+            rtl_files[file_name] = top_skeleton
+            transcripts.append(
+                {
+                    "stage": "coder",
+                    "profile": llm_config.profile,
+                    "turn_index": index,
+                    "file_name": file_name,
+                    "module_name": module_name,
+                    "role": role,
+                    "module_header": module_header,
+                    "port_contracts": port_contracts,
+                    "graph_elaborated": True,
+                    "extracted_rtl": top_skeleton,
+                }
+            )
+            continue
+
         if node is None:
             node_context = (
                 "Current file role: top-level RTL file. Generate only the top module. "
@@ -936,36 +1639,34 @@ def _emit_rtl_files_with_llm(
         messages = [
             {
                 "role": "system",
-                "content": (
-                    "You are an expert Verilog RTL engineer in a multi-file generation workflow. "
-                    "Generate synthesizable Verilog-2001 only. Return exactly one complete Verilog module and no explanation. "
-                    "Do not wrap multiple modules in one response. Do not use SystemVerilog-only syntax."
-                ),
+                "content": _render_template("coder_system.j2", multi_file=True),
             },
             {
                 "role": "user",
-                "content": (
-                    "Generate one RTL file for the current SpecReg file plan. "
-                    f"This is file {index + 1} of {len(planned_files)}.\n"
-                    f"Required file name: {file_name}\n"
-                    f"Required module name: {module_name}\n"
-                    f"{node_context}\n\n"
-                    "Respect these hard constraints:\n"
-                    "- Keep the required module name exactly.\n"
-                    "- Keep top-level module ports exactly as declared in SpecReg when generating the top file.\n"
-                    "- Do not invent undeclared top-level ports.\n"
-                    "- Use child module names from SpecReg instance nodes when generating top-level instantiations.\n"
-                    "- Use simple Verilog-2001 constructs only.\n\n"
-                    f"UserTaskSpec:\n{user_task_spec.model_dump_json(indent=2)}\n\n"
-                    f"SpecReg:\n{spec_reg.model_dump_json(indent=2)}\n\n"
-                    f"Already generated RTL files:\n{_generated_file_context(rtl_files)}"
-                    f"{retry_context}"
+                "content": _render_template(
+                    "multi_rtl_user.j2",
+                    file_index=index + 1,
+                    file_count=len(planned_files),
+                    file_name=file_name,
+                    module_name=module_name,
+                    module_header=module_header,
+                    node_context=node_context,
+                    role=role,
+                    port_contracts_json=json.dumps(port_contracts, indent=2, ensure_ascii=False),
+                    user_task_spec_json=user_task_spec.model_dump_json(indent=2),
+                    spec_reg_json=spec_reg.model_dump_json(indent=2),
+                    generated_file_context=_generated_file_context(rtl_files),
+                    retry_context=retry_context,
                 ),
             },
         ]
 
         content, transcript = _call_openai_compatible_chat(llm_config, messages)
-        rtl_code = _extract_single_verilog_module(content, module_name)
+        rtl_code = _normalize_module_framework(
+            _extract_single_verilog_module(content, module_name),
+            module_name,
+            port_contracts,
+        )
         rtl_files[file_name] = rtl_code
         transcript.update(
             {
@@ -975,10 +1676,15 @@ def _emit_rtl_files_with_llm(
                 "file_name": file_name,
                 "module_name": module_name,
                 "role": role,
+                "module_header": module_header,
+                "port_contracts": port_contracts,
                 "extracted_rtl": rtl_code,
             }
         )
         transcripts.append(transcript)
+
+    if top_file_name not in rtl_files:
+        rtl_files[top_file_name] = top_skeleton
 
     return rtl_files, transcripts
 
@@ -999,64 +1705,104 @@ def _build_spec_reg_with_llm(
     messages = [
         {
             "role": "system",
-            "content": (
-                "You are the Architect node in an RTL generation workflow. "
-                "Return JSON only for a complete SpecReg object. "
-                "The JSON must match these top-level fields: task_id, iteration, refactor_label, "
-                "intent, top_module, source_stage, module_description, parameters, ports, "
-                "clock_and_reset, protocols, verification_directives, functional_requirements, "
-                "corner_cases, illegal_conditions, latency_notes, nodes, edges. "
-                "Use source_stage=architect. For combinational designs, clock_and_reset can be an empty list. "
-                "Use width as a decimal bit count string such as '1', '3', or '8'. "
-                "Use port directions input, output, or inout, and net types wire, reg, or logic. "
-                "verification_directives, functional_requirements, corner_cases, illegal_conditions, "
-                "and latency_notes must be arrays of strings. "
-                "nodes must use node_id, node_type, module_name, description, is_pure_comb_logic, and is_rtl_file. "
-                "For explicitly requested multi-file or hierarchical designs, use instance nodes with "
-                "file_name, instance_name, parent_node_id=TOP, implementation_hint, and is_rtl_file=true. "
-                "Use is_pure_comb_logic=true only for indivisible pure combinational logic nodes; "
-                "sequential and instance nodes must keep is_pure_comb_logic=false. "
-                "For flat combinational designs, use nodes=[] and edges=[]. "
-                "Only include edges when source and target are EndpointRef objects with node_id and port_name."
-            ),
+            "content": _render_template("architect_system.j2"),
         },
         {
             "role": "user",
-            "content": (
-                "Generate the authoritative SpecReg contract for this task. "
-                "The Coder will be required to implement this SpecReg exactly, so include the real top-level ports "
-                "and functional intent from UserTaskSpec. Do not invent placeholder clock/reset/done ports unless "
-                "the user requirements explicitly ask for them.\n\n"
-                f"Task metadata:\n{task.model_dump_json(indent=2)}\n\n"
-                f"UserTaskSpec:\n{user_task_spec.model_dump_json(indent=2)}"
-                f"{previous_context}"
+            "content": _render_template(
+                "architect_user.j2",
+                task_json=task.model_dump_json(indent=2),
+                user_task_spec_json=user_task_spec.model_dump_json(indent=2),
+                previous_context=previous_context,
             ),
         },
     ]
 
-    content, transcript = _call_openai_compatible_chat(llm_config, messages)
-    spec_payload = _normalize_architect_spec_payload(_extract_json_object(content))
-    spec_payload.update(
-        {
-            "task_id": task.task_id,
-            "iteration": task.iteration,
-            "intent": task.intent.value,
-            "top_module": task.top_module,
-            "source_stage": ArtifactSourceStage.ARCHITECT.value,
-        }
-    )
-    if not spec_payload.get("functional_requirements"):
-        spec_payload["functional_requirements"] = user_task_spec.refined_requirements
+    transcripts = []
+    max_attempts = 3
+    last_error: Optional[Exception] = None
+    last_error_summary: Optional[Dict[str, Any]] = None
 
-    spec_reg = SpecReg.model_validate(spec_payload)
-    transcript.update(
-        {
-            "stage": "architect",
-            "profile": llm_config.profile,
-            "parsed_spec_reg": spec_reg.model_dump(mode="json"),
-        }
-    )
-    return spec_reg, transcript
+    for attempt_index in range(max_attempts):
+        content, transcript = _call_openai_compatible_chat(llm_config, messages)
+        json_text = ""
+        json_base_line = 1
+        spec_payload_for_repair: Optional[Dict[str, Any]] = None
+        try:
+            json_text, json_base_line = _extract_json_fragment(content)
+            parsed_payload = json.loads(json_text)
+            if not isinstance(parsed_payload, dict):
+                raise ValueError("LLM architect response JSON is not an object")
+
+            spec_payload = _normalize_architect_spec_payload(parsed_payload)
+            spec_payload_for_repair = spec_payload
+            spec_payload.update(
+                {
+                    "task_id": task.task_id,
+                    "iteration": task.iteration,
+                    "intent": task.intent.value,
+                    "top_module": task.top_module,
+                    "source_stage": ArtifactSourceStage.ARCHITECT.value,
+                }
+            )
+            if not spec_payload.get("functional_requirements"):
+                spec_payload["functional_requirements"] = user_task_spec.refined_requirements
+
+            spec_reg = SpecReg.model_validate(spec_payload)
+            transcript.update(
+                {
+                    "stage": "architect",
+                    "profile": llm_config.profile,
+                    "attempt": attempt_index + 1,
+                    "parsed_spec_reg": spec_reg.model_dump(mode="json"),
+                }
+            )
+            transcripts.append(transcript)
+            return spec_reg, {"stage": "architect", "profile": llm_config.profile, "attempts": transcripts}
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            last_error_summary = _summarize_architect_error(exc, json_text, json_base_line)
+            repair_frame = _build_architect_repair_frame(
+                task=task,
+                user_task_spec=user_task_spec,
+                spec_payload=spec_payload_for_repair,
+                exc=exc,
+                error_summary=last_error_summary,
+            )
+            repair_frame_path = _write_architect_repair_frame(task, attempt_index + 1, repair_frame)
+            transcript.update(
+                {
+                    "stage": "architect",
+                    "profile": llm_config.profile,
+                    "attempt": attempt_index + 1,
+                    "error_summary": last_error_summary,
+                    "repair_frame_path": repair_frame_path,
+                }
+            )
+            transcripts.append(transcript)
+            if attempt_index == max_attempts - 1:
+                break
+
+            messages = [
+                *messages,
+                {"role": "assistant", "content": content},
+                {"role": "system", "content": _render_template("architect_retry_system.j2")},
+                {
+                    "role": "user",
+                    "content": _format_architect_retry_feedback(
+                        last_error_summary,
+                        repair_frame_path,
+                        repair_frame,
+                    ),
+                },
+            ]
+
+    if last_error is None:
+        raise ValueError("Architect LLM did not produce a validation attempt")
+    if last_error_summary is not None:
+        setattr(last_error, "architect_error_summary", last_error_summary)
+        setattr(last_error, "architect_attempts", transcripts)
+    raise last_error
 
 
 def init_context_node(state: GenWorkflowState) -> Dict[str, Any]:
@@ -1131,25 +1877,15 @@ def architect_node(state: GenWorkflowState) -> Dict[str, Any]:
             )
             return {"spec_reg": spec_reg, "llm_transcripts": [llm_transcript]}
         except Exception as exc:  # noqa: BLE001
-            if _has_multi_file_directive(user_task_spec):
-                fallback_spec_reg = _build_multi_file_spec_reg(task, user_task_spec)
-            else:
-                fallback_spec_reg = _build_dummy_spec_reg(
-                    task=task,
-                    user_task_spec=user_task_spec,
-                    verify_rpt=verify_rpt,
-                )
-            return {
-                "spec_reg": fallback_spec_reg,
-                "llm_transcripts": [
-                    {
-                        "stage": "architect",
-                        "profile": llm_config.profile,
-                        "error": str(exc),
-                        "fallback": "dummy_spec_reg",
-                    }
-                ],
-            }
+            architect_attempts = getattr(exc, "architect_attempts", [])
+            architect_error_summary = getattr(exc, "architect_error_summary", None)
+            failure_artifact_path = _write_architect_failure_artifact(
+                task=task,
+                exc=exc,
+                architect_attempts=architect_attempts,
+                architect_error_summary=architect_error_summary,
+            )
+            raise ArchitectSpecRegFailure(failure_artifact_path, exc) from exc
 
     spec_reg = _build_dummy_spec_reg(
         task=task,
@@ -1243,13 +1979,21 @@ def finalize_node(state: GenWorkflowState) -> Dict[str, Any]:
     shared_task_dir = Path(task.shared_task_dir)
     specs_dir = shared_task_dir / "specs"
     rtl_dir = shared_task_dir / "rtl"
+    graphs_dir = shared_task_dir / "graphs"
     llm_dir = shared_task_dir / "llm"
 
     specs_dir.mkdir(parents=True, exist_ok=True)
     rtl_dir.mkdir(parents=True, exist_ok=True)
+    graphs_dir.mkdir(parents=True, exist_ok=True)
 
     spec_file_path = specs_dir / f"SpecReg_iter{task.iteration}.json"
     spec_file_path.write_text(spec_reg.model_dump_json(indent=2), encoding="utf-8")
+
+    hardware_graph = _spec_reg_to_hardware_graph(spec_reg)
+    hardware_graph_path = graphs_dir / f"HardwareGraph_iter{task.iteration}.json"
+    hardware_graph_mermaid_path = graphs_dir / f"HardwareGraph_iter{task.iteration}.mmd"
+    hardware_graph_path.write_text(json.dumps(hardware_graph, indent=2, ensure_ascii=False), encoding="utf-8")
+    hardware_graph_mermaid_path.write_text(hardware_graph["mermaid"], encoding="utf-8")
 
     rtl_paths: List[str] = []
     for file_name, file_content in rtl_files.items():
@@ -1299,6 +2043,8 @@ def finalize_node(state: GenWorkflowState) -> Dict[str, Any]:
         rtl_path=str(rtl_path),
         rtl_paths=rtl_paths,
         top_rtl_path=str(rtl_path),
+        hardware_graph_path=str(hardware_graph_path),
+        hardware_graph_mermaid_path=str(hardware_graph_mermaid_path),
         summary=summary,
     )
 
@@ -1318,7 +2064,7 @@ def build_gen_workflow_graph():
       -> END
 
     后续可扩展方向：
-    - architect/coder 之间加入“是否还存在未细化 instance 节点”的条件循环
+    - architect/coder 之间加入“是否还存在未细化 module 节点”的条件循环
     - 增加 static lint / 格式化节点
     - 增加中间产物自检节点
     """

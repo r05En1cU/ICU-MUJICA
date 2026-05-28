@@ -1,0 +1,32 @@
+Generate one RTL file for the current SpecReg file plan.
+This is file {{ file_index }} of {{ file_count }}.
+Required file name: {{ file_name }}
+Required module name: {{ module_name }}
+Current role: {{ role }}
+{{ node_context }}
+
+Required Module header, copy exactly:
+```verilog
+{{ module_header }}
+```
+
+Port contract strings:
+{{ port_contracts_json }}
+
+Respect these hard constraints:
+- Keep the required module name exactly.
+- Keep module ports exactly as declared in the Required Module header.
+- Do not add separate old-style input/output/inout declarations for ports already declared in the header.
+- Do not invent undeclared top-level ports.
+- Use child module names from SpecReg module nodes when generating top-level instantiations.
+- Use simple Verilog-2001 constructs only.
+- Do not emit newer-HDL constructs such as logic, always_ff, always_comb, typedef, enum, struct, interface, package, or import.
+
+UserTaskSpec:
+{{ user_task_spec_json }}
+
+SpecReg:
+{{ spec_reg_json }}
+
+Already generated RTL files:
+{{ generated_file_context }}{{ retry_context }}
