@@ -13,6 +13,7 @@
 - 可自我迭代的 skill 设置，方便针对模型调整以获得最佳性能
 ---
 ## v2.0.0 文件目录架构（计划构成）
+```
 ICU-MUJICA
 |- src                - 源码存放
 |  |- common          - 共享类型（skill 统一化协议模型、pydantic 检查类型）
@@ -24,6 +25,7 @@ ICU-MUJICA
 |  |- backend         - 后端输出（报告、网表等）
 |- docker_compose.yml
 |- requirements.txt
+```
 ---
 ## 技术栈选择
 | 维度 | 选型 | 作用 |
