@@ -1,3 +1,13 @@
+<!-- gpt-chat-meta:start -->
+> [!info] GPT Chat 时间信息
+> - 时间顺序：02 / 10（按 JSON `create_time` 升序）
+> - 标题：AI Agent技能定义演变
+> - 创建时间：2026-06-04 07:39:08 CST
+> - 更新时间：2026-06-04 07:44:09 CST
+> - Conversation ID：`6a20bb12-dc64-83ea-97e6-adff1a695cc4`
+> - 来源：同名 JSON 顶层时间字段；JSON 已在本次整理后删除。
+<!-- gpt-chat-meta:end -->
+
 # User
 AI Agent的skill指的是什么？有没有相对早期的定义以及可复现的代码仓库使用？
 
