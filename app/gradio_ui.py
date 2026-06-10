@@ -20,19 +20,19 @@ DEFAULT_SHARED_ROOT = Path(os.getenv("ICU_MUJICA_SHARED_ROOT", "shared_workspace
 REQUEST_TIMEOUT_SECONDS = float(os.getenv("ICU_MUJICA_UI_TIMEOUT_SECONDS", "480"))
 UI_POLL_SECONDS = max(0.5, float(os.getenv("ICU_MUJICA_UI_POLL_SECONDS", "2")))
 
-AGENT_ORDER = ["Parser", "Generator", "Verify", "Archive"]
+AGENT_ORDER = ["Parser", "Execute", "Evaluate", "Archive"]
 NODE_TO_AGENT = {
     "parser_initialize": "Parser",
-    "gen_stateless": "Generator",
-    "verify_stateless": "Verify",
+    "execute_stateless": "Execute",
+    "evaluate_stateless": "Evaluate",
     "prepare_retry": "Parser",
     "archive_success": "Archive",
     "archive_failed": "Archive",
 }
 AGENT_WEIGHTS = {
     "Parser": 15,
-    "Generator": 40,
-    "Verify": 30,
+    "Execute": 40,
+    "Evaluate": 30,
     "Archive": 15,
 }
 BOX_NODE_RE = re.compile(r'^\s*(?P<id>[A-Za-z_][A-Za-z0-9_]*)\["(?P<label>.*?)"\]\s*$')
@@ -261,9 +261,9 @@ def _unfinished_task_rows() -> List[List[str]]:
         verify_files = sorted((shared_task_dir / "sim").glob("VerifyRpt_iter*.json")) if shared_task_dir.exists() else []
         origin_path = output_task_dir / "Origin" / "request.txt"
         if verify_files:
-            stage = "verify"
+            stage = "evaluate"
         elif rtl_files or spec_files:
-            stage = "generator"
+            stage = "execute"
         elif origin_path.exists():
             stage = "parser"
         else:
@@ -306,8 +306,8 @@ def _running_snapshot(task_id: Optional[str], started_at: float) -> Tuple[str, i
     verify_files = sorted(path for root in artifact_roots for path in (root / "sim").glob("VerifyRpt_iter*.json"))
 
     parser_done = user_task_spec.exists()
-    generator_done = bool(spec_files and rtl_files)
-    verify_done = bool(verify_files)
+    execute_done = bool(spec_files and rtl_files)
+    evaluate_done = bool(verify_files)
     archived = result_dir.exists() or archive_dir.exists()
 
     rows[0] = [
@@ -320,39 +320,39 @@ def _running_snapshot(task_id: Optional[str], started_at: float) -> Tuple[str, i
         _mtime_text(user_task_spec if user_task_spec.exists() else parser_chat),
     ]
     rows[1] = [
-        "Generator",
-        "completed" if generator_done else ("running" if parser_done else "waiting"),
-        100 if generator_done else (45 if parser_done else 0),
-        "gen_stateless",
+        "Execute",
+        "completed" if execute_done else ("running" if parser_done else "waiting"),
+        100 if execute_done else (45 if parser_done else 0),
+        "execute_stateless",
         _latest_iteration(spec_files),
-        "RTL emitted" if rtl_files else ("generating RTL" if parser_done else "-"),
+        "RTL emitted" if rtl_files else ("executing RTL generation" if parser_done else "-"),
         _mtime_text(rtl_files[-1] if rtl_files else (spec_files[-1] if spec_files else None)),
     ]
     rows[2] = [
-        "Verify",
-        "completed" if verify_done else ("running" if generator_done else "waiting"),
-        100 if verify_done else (65 if generator_done else 0),
-        "verify_stateless",
+        "Evaluate",
+        "completed" if evaluate_done else ("running" if execute_done else "waiting"),
+        100 if evaluate_done else (65 if execute_done else 0),
+        "evaluate_stateless",
         _latest_iteration(verify_files),
-        "verify report saved" if verify_done else ("checking RTL" if generator_done else "-"),
+        "evaluate report saved" if evaluate_done else ("evaluating RTL" if execute_done else "-"),
         _mtime_text(verify_files[-1] if verify_files else None),
     ]
     rows[3] = [
         "Archive",
-        "completed" if archived else ("running" if verify_done else "waiting"),
-        100 if archived else (85 if verify_done else 0),
+        "completed" if archived else ("running" if evaluate_done else "waiting"),
+        100 if archived else (85 if evaluate_done else 0),
         "archive",
         "-",
-        "artifacts archived" if archived else ("waiting for final archive" if verify_done else "-"),
+        "artifacts archived" if archived else ("waiting for final archive" if evaluate_done else "-"),
         _mtime_text(result_dir if result_dir.exists() else archive_dir if archive_dir.exists() else None),
     ]
 
     progress = 10
     if parser_done:
         progress = 25
-    if generator_done:
+    if execute_done:
         progress = 65
-    if verify_done:
+    if evaluate_done:
         progress = 85
     if archived:
         progress = 100

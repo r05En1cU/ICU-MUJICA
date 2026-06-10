@@ -16,9 +16,9 @@ User / Gradio UI
   v
 Parser service  (external: 127.0.0.1:8001)
   |
-  +--> Generator service (internal: gen:8000)
+  +--> Execute service   (internal: execute:8000)
   |
-  +--> Verify service    (internal: verify:8000)
+  +--> Evaluate service  (internal: evaluate:8000)
 
 Persistent task data:
   output/TASK_ID/{Origin,Result,Archive}
@@ -26,7 +26,7 @@ Persistent task data:
 ```
 
 - `parser` 是唯一对宿主机暴露 HTTP 入口的服务，负责请求接收、任务初始化、状态机编排、重试路由和归档。
-- `gen` 与 `verify` 仅在 Docker 内部网络中开放 API，不直接暴露给外部用户。
+- `execute` 与 `evaluate` 仅在 Docker 内部网络中开放 API，不直接暴露给外部用户。
 - 大对象通过共享文件系统传递，HTTP 层只传输路径、状态摘要和结构化报告。
 - Gradio GUI 位于 `app/gradio_ui.py`，用于健康检查、提交任务、观察进度、预览产物、管理未完成任务。
 
@@ -37,9 +37,9 @@ Persistent task data:
 ### 2.1 阶段产物清晰分工
 
 - Parser 维护 `UserTaskSpec`：用户意图、顶层模块、原始需求与提炼后的需求。
-- Generator Architect 维护 `SpecReg`：结构化接口、参数、功能要求、时钟复位、协议、RTL 图结构。
-- Generator Coder 维护 RTL：根据 `SpecReg` 生成 Verilog-2001 源码。
-- Verify 维护 `VerifyRpt`：验证 verdict、错误快照、修复建议与日志路径。
+- Execute Architect 维护 `SpecReg`：结构化接口、参数、功能要求、时钟复位、协议、RTL 图结构。
+- Execute Coder 维护 RTL：根据 `SpecReg` 生成 Verilog-2001 源码。
+- Evaluate 维护 `VerifyRpt`：验证 verdict、错误快照、修复建议与日志路径。
 
 ### 2.2 控制面与数据面分离
 
@@ -49,7 +49,7 @@ Persistent task data:
 
 ### 2.3 失败必须显式暴露
 
-真实 LLM 路径不允许用 dummy RTL 静默兜底。Architect、Coder 或 Verify 失败时，应落盘 transcript、修复上下文和结构化错误，并由 Parser 明确归档为失败或进入下一轮 retry。
+真实 LLM 路径不允许用 dummy RTL 静默兜底。Architect、Coder 或 Evaluate 失败时，应落盘 transcript、修复上下文和结构化错误，并由 Parser 明确归档为失败或进入下一轮 retry。
 
 ### 2.4 Verilog-2001 优先
 
@@ -57,14 +57,14 @@ Persistent task data:
 
 - 禁止输出 SystemVerilog `logic` 等新语法。
 - 顶层端口类型限定为 `wire` / `reg`。
-- Verify 静态端口解析不接受 `logic`。
+- Evaluate 静态端口解析不接受 `logic`。
 - Coder prompt 必须明确“可综合 Verilog-2001”。
 
 ---
 
 ## 3. Parser Agent
 
-Parser 是系统的 Orchestrator，负责把用户请求转化为可执行任务，并驱动 Generator / Verify 的多轮闭环。
+Parser 是系统的 Orchestrator，负责把用户请求转化为可执行任务，并驱动 Execute / Evaluate 的多轮闭环。
 
 ### 3.1 任务初始化
 
@@ -115,16 +115,16 @@ Parser 根据 `VerifyRpt.verdict` 决策：
 
 ### 3.4 超时与运行时配置
 
-- Generator 调用超时由 `GEN_SERVICE_TIMEOUT_SECONDS` 控制，默认 420 秒。
-- Verify 调用超时由 `VERIFY_SERVICE_TIMEOUT_SECONDS` 控制，默认 420 秒。
+- Execute 调用超时由 `EXECUTE_SERVICE_TIMEOUT_SECONDS` 控制，默认 420 秒。
+- Evaluate 调用超时由 `EVALUATE_SERVICE_TIMEOUT_SECONDS` 控制，默认 420 秒。
 - LLM 运行时配置优先使用请求体 `llm` 字段，其次读取环境变量。
 - 当前主前缀为 `ICU_MUJICA_LLM_*` 和 `X-ICU-MUJICA-LLM-*`，兼容旧 `AGVS4RTL_*` 前缀。
 
 ---
 
-## 4. Generator Agent
+## 4. Execute Agent
 
-Generator 在系统中承担 “Architect + Coder” 双角色。
+Execute 在系统中承担 “Architect + Coder” 双角色。
 
 ### 4.1 输入与输出边界
 
@@ -145,7 +145,7 @@ Generator 在系统中承担 “Architect + Coder” 双角色。
 
 ### 4.2 Architect 阶段：SpecReg
 
-`SpecReg` 是 Generator 的结构化设计契约。它必须包含：
+`SpecReg` 是 Execute 的结构化设计契约。它必须包含：
 
 - `top_module`；
 - 参数与端口定义；
@@ -170,7 +170,7 @@ RTL graph 是层次化设计的结构事实来源：
 
 ### 4.4 Graph-driven Skeleton Elaboration
 
-当 `SpecReg.nodes` 和 `SpecReg.edges` 描述层次结构时，Generator 应确定性生成顶层 skeleton：
+当 `SpecReg.nodes` 和 `SpecReg.edges` 描述层次结构时，Execute 应确定性生成顶层 skeleton：
 
 - 根据 `SpecReg.ports` 生成顶层 module header。
 - 根据 child incident edges 推导子模块端口契约。
@@ -194,13 +194,13 @@ Coder 必须：
 
 ---
 
-## 5. Verify Agent
+## 5. Evaluate Agent
 
-Verify 是裁决器与诊断器。它不修改 RTL，只判断当前产物是否满足 `SpecReg` 契约，并生成可供 Parser 路由和 Generator retry 使用的反馈。
+Evaluate 是裁决器与诊断器。它不修改 RTL，只判断当前产物是否满足 `SpecReg` 契约，并生成可供 Parser 路由和 Execute retry 使用的反馈。
 
 ### 5.1 验证流程
 
-当前 Verify 内部流程为：
+当前 Evaluate 内部流程为：
 
 ```text
 init_context
@@ -221,7 +221,7 @@ init_context
 
 ### 5.3 静态契约检查
 
-Verify 当前至少需要检查：
+Evaluate 当前至少需要检查：
 
 - SpecReg 文件存在且可解析；
 - RTL 文件存在且可读取；
@@ -231,11 +231,11 @@ Verify 当前至少需要检查：
 - Verilog-2001 约束未被破坏；
 - 多 RTL 文件可作为同一编译单元交给 `iverilog`。
 
-后续应扩展 graph contract 检查：当 `SpecReg.edges` 描述了子模块接口时，Verify 应确认子模块 module header 与 graph-derived child port contract 一致。
+后续应扩展 graph contract 检查：当 `SpecReg.edges` 描述了子模块接口时，Evaluate 应确认子模块 module header 与 graph-derived child port contract 一致。
 
 ### 5.4 LLM 诊断增强
 
-Verify LLM 只负责解释失败和补充修复建议，不决定 verdict。LLM 调用失败时必须保持确定性检查结果不变。
+Evaluate LLM 只负责解释失败和补充修复建议，不决定 verdict。LLM 调用失败时必须保持确定性检查结果不变。
 
 诊断 transcript 写入：
 
@@ -332,7 +332,7 @@ shared_workspace/TASK_ID/
 
 - 三服务生成-验证-归档闭环；
 - 基本 retry 路由；
-- 真实 LLM Parser / Architect / Coder / Verify 诊断路径；
+- 真实 LLM Parser / Architect / Coder / Evaluate 诊断路径；
 - 严格端口契约检查；
 - 多 RTL 文件编译单元支持；
 - Verilog-2001 收敛；
@@ -350,7 +350,7 @@ shared_workspace/TASK_ID/
 
 - 简单和中等 RTL 任务已可作为可审查初稿生成工具使用。
 - 复杂结构需求可能退化为扁平功能实现，或出现可修复的 Verilog 细节错误。
-- 对复杂架构任务，必须继续把结构语义硬化到 Architect prompt、SpecReg graph validation 和 Verify graph contract 中。
+- 对复杂架构任务，必须继续把结构语义硬化到 Architect prompt、SpecReg graph validation 和 Evaluate graph contract 中。
 
 ---
 
@@ -359,7 +359,7 @@ shared_workspace/TASK_ID/
 优先级从高到低：
 
 1. 为结构性需求增加 Architect 硬规则：检测到“低位宽单元组合、复用、BitFusion、tile、adder tree、controller”等关键词时，禁止空 `nodes/edges`。
-2. Verify 增加 graph-derived child port contract 检查，确保子模块 header 与 `SpecReg.edges` 一致。
+2. Evaluate 增加 graph-derived child port contract 检查，确保子模块 header 与 `SpecReg.edges` 一致。
 3. 对常见 Verilog-2001 错误增加静态预检查，例如 function 参数声明、parameterized width 解析、非法数组声明位置。
 4. 增加轻量 testbench / directed simulation 生成能力，覆盖 `functional_requirements` 与 `corner_cases`。
 5. 将 GUI 中的失败归因和 retry 建议展示得更直接，减少手工翻 artifact 的成本。

@@ -1,4 +1,4 @@
-# docker/Dockerfile.verify
+# docker/Dockerfile.evaluate
 FROM python:3.11-slim-bullseye
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -26,10 +26,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN chmod -R a+rX /usr/local/lib/python3.11/site-packages
 RUN chmod -R a+rx /usr/local/bin/
 
-# 5. 拷贝验证逻辑
+# 5. 拷贝评估逻辑
 COPY ./src /ICU-MUJICA/src
 
-# 6. 启动 FastAPI 服务 (Verify 接口)
+# 6. 启动 FastAPI 服务 (Evaluate 接口)
 # 用 --workers 2 限制并发验证任务数
 WORKDIR /ICU-MUJICA
 ENV PYTHONPATH=/ICU-MUJICA

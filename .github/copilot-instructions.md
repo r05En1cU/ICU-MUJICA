@@ -4,13 +4,13 @@
 - Prefer strict typing and schema-first design with Pydantic models in `src/common/models.py`.
 - Reuse existing enums and models before adding new protocol fields; avoid ad-hoc dict payloads between modules.
 - Keep comments concise and practical; preserve existing Chinese comments and domain terms when editing nearby code.
-- Keep service code separated by module domain: parser logic in `src/parser`, generation logic in `src/generator`, verification logic in `src/verify`.
+- Keep service code separated by module domain: parser logic in `src/parser`, execution logic in `src/generator`, evaluation logic in `src/verify`.
 
 ## Architecture
 - This project uses a multi-service layout orchestrated by Docker Compose:
 	- Parser service: `src/parser`
-	- Generator service: `src/generator`
-	- Verify service: `src/verify`
+	- Execute service: `src/generator`
+	- Evaluate service: `src/verify`
 - Shared artifacts flow through `shared_workspace/` (`specs/`, `rtl/`, `sim/`) mounted under `/ICU-MUJICA` in all containers; archived results land in lowercase `output/`.
 - `src/common/models.py` is the contract layer for cross-node data; treat it as the source of truth for payload structure.
 - The repository is in a transition state from Celery/Redis to FastAPI/LangGraph; prefer current FastAPI-oriented patterns in Docker files and compose config.
@@ -22,7 +22,7 @@
 	- `docker-compose up -d --build`
 - Stop services:
 	- `docker-compose down`
-- Verify Python syntax quickly when tests are unavailable:
+- Python syntax quickly when tests are unavailable:
 	- `python -m compileall src`
 - If implementing API entrypoints, ensure compose targets exist (`src.parser.main`, `src.generator.main`, `src.verify.main`).
 

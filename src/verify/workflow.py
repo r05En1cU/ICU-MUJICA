@@ -42,7 +42,7 @@ def _render_template(template_name: str, **context: Any) -> str:
 
 class VerifyWorkflowState(TypedDict):
     """
-    Verify 内部 LangGraph 状态。
+    Evaluate 内部 LangGraph 状态。
 
     说明：
     - task_payload: Parser 下发的验证任务载荷
@@ -57,7 +57,7 @@ class VerifyWorkflowState(TypedDict):
     - verify_rpt: 本轮验证报告
     - verify_output: 对外返回的最终输出
     - llm_config: 本次运行的 LLM 配置，仅运行期使用，不落盘敏感信息
-    - llm_transcripts: Verify 诊断增强的对话记录
+    - llm_transcripts: Evaluate 诊断增强的对话记录
     """
     task_payload: VerifyTaskPayload
     iteration: int
@@ -257,7 +257,7 @@ def _load_rtl_texts(rtl_paths: List[str]) -> str:
 
 def _build_paths(task_payload: VerifyTaskPayload) -> Dict[str, str]:
     """
-    构建 Verify 阶段所需的统一输出路径。
+    构建 Evaluate 阶段所需的统一输出路径。
 
     当前约定：
     - VerifyRpt: shared_workspace/TASK_ID/sim/VerifyRpt_iter{n}.json
@@ -579,11 +579,11 @@ def _build_infra_error_report(
         iteration=task.iteration,
         intent=task.intent,
         top_module=task.top_module,
-        source_stage=ArtifactSourceStage.VERIFY,
+        source_stage=ArtifactSourceStage.EVALUATE,
         verdict=VerifyVerdict.INFRA_ERROR,
         error_details=ErrorSnapshot(
             infra_errors=[infra_error],
-            suggested_fix="check verify environment, input file paths, and upstream artifacts",
+            suggested_fix="check evaluate environment, input file paths, and upstream artifacts",
         ),
     )
 
@@ -603,7 +603,7 @@ def _build_semantic_fail_report(
         iteration=task.iteration,
         intent=task.intent,
         top_module=task.top_module,
-        source_stage=ArtifactSourceStage.VERIFY,
+        source_stage=ArtifactSourceStage.EVALUATE,
         verdict=VerifyVerdict.FAIL_SEMANTIC,
         error_details=ErrorSnapshot(
             mismatched_ports=mismatches,
@@ -630,7 +630,7 @@ def _build_compile_fail_report(
         iteration=task.iteration,
         intent=task.intent,
         top_module=task.top_module,
-        source_stage=ArtifactSourceStage.VERIFY,
+        source_stage=ArtifactSourceStage.EVALUATE,
         verdict=VerifyVerdict.FAIL_COMPILE,
         error_details=ErrorSnapshot(
             compile_errors=compile_errors,
@@ -654,7 +654,7 @@ def _build_pass_report(
         iteration=task.iteration,
         intent=task.intent,
         top_module=task.top_module,
-        source_stage=ArtifactSourceStage.VERIFY,
+        source_stage=ArtifactSourceStage.EVALUATE,
         verdict=VerifyVerdict.PASS,
         error_details=ErrorSnapshot(),
         sim_log_path=compile_log_path,
@@ -765,12 +765,12 @@ def compile_check_node(state: VerifyWorkflowState) -> Dict[str, Any]:
     3. 若编译失败，生成 FAIL_COMPILE 报告。
 
     环境变量：
-    - VERIFY_ENABLE_IVERILOG=true/false
+    - EVALUATE_ENABLE_IVERILOG=true/false
     """
     if state.get("verify_rpt") is not None:
         return {}
 
-    enabled = os.getenv("VERIFY_ENABLE_IVERILOG", "true").lower() == "true"
+    enabled = os.getenv("EVALUATE_ENABLE_IVERILOG", "true").lower() == "true"
     if not enabled:
         return {}
 
@@ -794,7 +794,7 @@ def compile_check_node(state: VerifyWorkflowState) -> Dict[str, Any]:
         return {
             "verify_rpt": _build_infra_error_report(
                 task_payload,
-                f"iverilog not available in verify container: {exc}",
+                f"iverilog not available in evaluate container: {exc}",
             )
         }
     except Exception as exc:  # noqa: BLE001
@@ -921,7 +921,7 @@ def finalize_node(state: VerifyWorkflowState) -> Dict[str, Any]:
 
 def build_verify_workflow_graph():
     """
-    构建 Verify 内部状态机。
+    构建 Evaluate 内部状态机。
 
     当前执行路径：
     START
@@ -959,7 +959,7 @@ def run_verify_workflow(
     llm_config: Optional[LlmRuntimeConfig] = None,
 ) -> VerifyNodeOutput:
     """
-    Verify 工作流统一入口。
+    Evaluate 工作流统一入口。
 
     输入：
     - Parser 下发的 VerifyTaskPayload
@@ -989,6 +989,6 @@ def run_verify_workflow(
 
     verify_output = final_state.get("verify_output")
     if verify_output is None:
-        raise RuntimeError("verify workflow failed to produce VerifyNodeOutput")
+        raise RuntimeError("evaluate workflow failed to produce VerifyNodeOutput")
 
     return verify_output

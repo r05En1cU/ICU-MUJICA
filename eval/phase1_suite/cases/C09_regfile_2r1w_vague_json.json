@@ -1,0 +1,9 @@
+{
+  "case_id": "C09_regfile_2r1w_vague_json",
+  "top_module": "regfile_2r1w",
+  "prompt_type": "vague_json",
+  "category": "register_file_storage",
+  "difficulty": "L3_L4",
+  "max_iterations": 3,
+  "raw_input_text": "{\n  \"module\": \"regfile_2r1w\",\n  \"description\": \"small register file with 2 read ports and 1 write port\",\n  \"data_width\": 8,\n  \"num_regs\": 8,\n  \"reset\": \"clear registers\",\n  \"behavior\": \"write on clock, reads available from addresses\",\n  \"notes\": \"make it simple and synthesizable Verilog-2001\"\n}"
+}

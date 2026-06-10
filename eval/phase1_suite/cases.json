@@ -1,0 +1,13 @@
+[
+  "cases/C01_priority_encoder8_detailed_nl.json",
+  "cases/C02_rr_arbiter4_detailed_nl.json",
+  "cases/C03_sync_fifo_4x8_detailed_nl.json",
+  "cases/C04_pwm_generator_vague_nl.json",
+  "cases/C05_skid_buffer_vague_nl.json",
+  "cases/C06_pulse_sync_vague_nl.json",
+  "cases/C07_timer_irq_detailed_json.json",
+  "cases/C08_uart_tx_lite_detailed_json.json",
+  "cases/C09_regfile_2r1w_vague_json.json",
+  "cases/C10_sequence_detector_vague_json.json",
+  "cases/Cextra_multi_submodules_staged_mux_fifo.json"
+]

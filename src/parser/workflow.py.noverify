@@ -28,7 +28,7 @@ class WorkflowState(TypedDict):
     Parser 侧 LangGraph 全局状态。
 
     当前版本目标：
-    - 先打通 Parser -> Generator 的最小闭环
+    - 先打通 Parser -> Execute 的最小闭环
     - 暂时不接入 Verify
     - 实现“接收请求 -> 初始化任务 -> 调用生成 -> 归档成功 -> 返回结果”
     """
@@ -36,7 +36,7 @@ class WorkflowState(TypedDict):
     request: WorkflowRunRequest
     task: Optional[WorkTaskPayload]  # 当前任务的轻量载荷
     trace: Annotated[List[WorkflowTraceStep], operator.add]  # 执行轨迹
-    gen_output: Optional[GenNodeOutput]  # Generator 输出
+    gen_output: Optional[GenNodeOutput]  # Execute 输出
 
     task_paths: Optional[TaskPaths]  # 当前任务的统一目录布局
     user_task_spec_path: Optional[str]  # output 目录中的 UserTaskSpec 路径
@@ -119,7 +119,7 @@ def parser_initialize_node(state: WorkflowState) -> Dict[str, Any]:
     3. 将原始输入落盘到 Origin；
     4. 进行意图路由，构造 UserTaskSpec；
     5. 将 UserTaskSpec 分别落盘到 output 与 shared_workspace/specs；
-    6. 构造 WorkTaskPayload，供 Generator 使用。
+    6. 构造 WorkTaskPayload，供 Execute 使用。
     """
     request = state["request"]
     task_id = generate_global_task_id()
@@ -161,7 +161,7 @@ def parser_initialize_node(state: WorkflowState) -> Dict[str, Any]:
         encoding="utf-8",
     )
 
-    # 再落盘一份到 SharedWorkspace/specs，供 Generator 服务读取
+    # 再落盘一份到 SharedWorkspace/specs，供 Execute 服务读取
     shared_user_task_spec_path = Path(task_paths.specs_dir) / "UserTaskSpec.json"
     shared_user_task_spec_path.write_text(
         user_task_spec.model_dump_json(indent=2),
@@ -194,24 +194,24 @@ def parser_initialize_node(state: WorkflowState) -> Dict[str, Any]:
     }
 
 
-def gen_stateless_node(state: WorkflowState) -> Dict[str, Any]:
+def execute_stateless_node(state: WorkflowState) -> Dict[str, Any]:
     """
-    节点 2：调用 Generator 内部服务。
+    节点 2：调用 Execute 内部服务。
 
     职责：
     1. 从状态中读取 WorkTaskPayload；
-    2. 调用内部 Generator 服务；
+    2. 调用内部 Execute 服务；
     3. 获取 GenNodeOutput；
     4. 将生成结果写回工作流状态。
 
-    当前为了排查 422 问题，会在失败时打印 Generator 返回的详细 body。
+    当前为了排查 422 问题，会在失败时打印 Execute 返回的详细 body。
     """
     task = state.get("task")
     if task is None:
         raise ValueError("task payload is missing")
 
-    gen_base_url = os.getenv("GEN_SERVICE_URL", "http://gen:8000")
-    endpoint = f"{gen_base_url}/v1/generate"
+    gen_base_url = os.getenv("EXECUTE_SERVICE_URL", "http://execute:8000")
+    endpoint = f"{gen_base_url}/v1/execute"
 
     payload_json = task.model_dump(mode="json")
     print("GEN PAYLOAD:", payload_json)
@@ -221,12 +221,12 @@ def gen_stateless_node(state: WorkflowState) -> Dict[str, Any]:
 
     if response.status_code >= 400:
         raise ValueError(
-            f"generator request failed: status={response.status_code}, body={response.text}, payload={payload_json}"
+            f"execute request failed: status={response.status_code}, body={response.text}, payload={payload_json}"
         )
 
     response_payload = response.json()
     if response_payload.get("status") != "success" or response_payload.get("data") is None:
-        raise ValueError(f"generator returned invalid data: {response_payload}")
+        raise ValueError(f"execute returned invalid data: {response_payload}")
 
     gen_output = GenNodeOutput.model_validate(response_payload["data"])
 
@@ -234,9 +234,9 @@ def gen_stateless_node(state: WorkflowState) -> Dict[str, Any]:
         "gen_output": gen_output,
         "trace": [
             WorkflowTraceStep(
-                node="gen_stateless",
+                node="execute_stateless",
                 status="success",
-                detail=str(response_payload.get("message", "generator completed")),
+                detail=str(response_payload.get("message", "execute completed")),
                 iteration=task.iteration,
             )
         ],
@@ -247,7 +247,7 @@ def archive_success_node(state: WorkflowState) -> Dict[str, Any]:
     """
     节点 3：成功归档节点。
 
-    当前最小闭环模式下，不等待 Verify，Generator 成功即视为本阶段成功。
+    当前最小闭环模式下，不等待 Verify，Execute 成功即视为本阶段成功。
 
     职责：
     1. 将 shared_workspace/TASK_ID 下的所有产物复制到 output/TASK_ID/Result/shared_workspace；
@@ -292,23 +292,23 @@ def build_workflow_graph():
     执行路径：
     START
       -> parser_initialize
-      -> gen_stateless
+      -> execute_stateless
       -> archive_success
       -> END
 
     说明：
-    - 当前版本专注打通 Parser + Generator 的主链路；
+    - 当前版本专注打通 Parser + Execute 的主链路；
     - Verify 将在后续阶段接回流程。
     """
     graph = StateGraph(WorkflowState)
 
     graph.add_node("parser_initialize", parser_initialize_node)
-    graph.add_node("gen_stateless", gen_stateless_node)
+    graph.add_node("execute_stateless", execute_stateless_node)
     graph.add_node("archive_success", archive_success_node)
 
     graph.add_edge(START, "parser_initialize")
-    graph.add_edge("parser_initialize", "gen_stateless")
-    graph.add_edge("gen_stateless", "archive_success")
+    graph.add_edge("parser_initialize", "execute_stateless")
+    graph.add_edge("execute_stateless", "archive_success")
     graph.add_edge("archive_success", END)
 
     return graph.compile()
@@ -325,7 +325,7 @@ def run_workflow(request: WorkflowRunRequest) -> WorkflowRunResult:
     - WorkflowRunResult
 
     当前阶段说明：
-    - 一旦 Generator 成功落盘产物，即返回 success=True；
+    - 一旦 Execute 成功落盘产物，即返回 success=True；
     - 不等待 Verify 服务。
     """
     app = build_workflow_graph()

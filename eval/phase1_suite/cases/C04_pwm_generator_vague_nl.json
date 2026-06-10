@@ -1,0 +1,9 @@
+{
+  "case_id": "C04_pwm_generator_vague_nl",
+  "top_module": "pwm_generator",
+  "prompt_type": "vague_nl",
+  "category": "counter_pwm",
+  "difficulty": "L2_L3",
+  "max_iterations": 3,
+  "raw_input_text": "帮我写一个简单 PWM 模块，模块名 pwm_generator。有 clk 和 reset，输入 duty 和 period，输出 pwm_out。希望 duty 小于 period 的时候能输出对应占空比，reset 后输出关闭。尽量写成可综合 Verilog-2001，不要太复杂。"
+}

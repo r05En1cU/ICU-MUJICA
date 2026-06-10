@@ -1,0 +1,9 @@
+{
+  "case_id": "C06_pulse_sync_vague_nl",
+  "top_module": "pulse_sync",
+  "prompt_type": "vague_nl",
+  "category": "cdc_pulse_synchronizer",
+  "difficulty": "L4",
+  "max_iterations": 3,
+  "raw_input_text": "写一个把 src_clk 域的单周期 pulse 同步到 dst_clk 域的模块，模块名 pulse_sync。需要尽量安全，输出 dst_pulse。两个时钟域都有低有效 reset。使用可综合 Verilog-2001。"
+}

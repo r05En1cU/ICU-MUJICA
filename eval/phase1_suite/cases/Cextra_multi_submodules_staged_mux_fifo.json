@@ -1,0 +1,298 @@
+{
+  "case_id": "Cextra_multi_submodules_staged_mux_fifo",
+  "top_module": "staged_mux_fifo_top",
+  "prompt_type": "detailed_nl",
+  "category": "multi_module_flattening",
+  "difficulty": "L4_strict",
+  "max_iterations": 3,
+  "raw_input_text": "Generate a synthesizable Verilog-2001 multi-module design.\n\nThe top module is named `staged_mux_fifo_top`. It has exactly the six top-level ports listed below; do not add, remove, rename, or widen any top-level port. It instantiates exactly three submodules described below. Put the top module in `staged_mux_fifo_top.v`. Put each submodule in its own RTL file named exactly as specified. Do not duplicate a module definition across files. The generated design must compile as-is with iverilog when all generated `.v` files are provided.\n\nSubmodule 1: `mux_4to1` in file `mux_4to1.v`\n- ports:\n  - input wire [3:0] a, b, c, d\n  - input wire [1:0] sel\n  - output reg [3:0] y\n- Behavior: purely combinational. Use a default assignment before the case statement to avoid latches. sel=0 selects a, sel=1 selects b, sel=2 selects c, sel=3 selects d.\n\nSubmodule 2: `rising_edge_detector` in file `rising_edge_detector.v`\n- ports:\n  - input wire clk\n  - input wire rst_n\n  - input wire in\n  - output reg out\n- Behavior: asynchronous active-low reset. Use two sampled flops or an equivalent shift-register scheme. `out` must be a one-clock-cycle pulse when `in` transitions 0→1 and must otherwise be 0.\n\nSubmodule 3: `sync_fifo_2x4` in file `sync_fifo_2x4.v`\n- ports:\n  - input wire clk\n  - input wire rst_n\n  - input wire wr_en\n  - input wire rd_en\n  - input wire [3:0] din\n  - output wire full\n  - output wire empty\n  - output reg [3:0] dout\n  - output reg [1:0] count\n- Behavior: synchronous FIFO, depth exactly 2, data width exactly 4. Async active-low reset clears pointers, count, and dout. `count` is the number of entries currently stored (0,1,2). A write is accepted only when `wr_en && !full`. A read is accepted only when `rd_en && !empty`. Writes while full are ignored. Reads while empty are ignored. Simultaneous accepted read and write keep count unchanged. Use sequential pointer update. `dout` updates to the item read on an accepted read.\n\nTop module `staged_mux_fifo_top`:\n- ports, exactly in meaning and width:\n  - input wire        clk\n  - input wire        rst_n\n  - input wire [3:0]  din\n  - output reg [3:0]  dout\n  - output reg        valid\n  - output reg [1:0]  stage\n- Internal wiring and behavior:\n  1. Instantiate one `mux_4to1`. Tie `a` to 4'b0000, `b` to `din`, `c` to 4'b1010, and `d` to 4'b0101. Drive `sel[1]` from `din[3]`. Drive `sel[0]` from a free-running modulo-2 counter bit. The mux output is the only data source for the FIFO `din` port.\n  2. Instantiate one `rising_edge_detector`. Feed a free-running clk-divided-by-4 toggle signal into its `in` port. Name or treat the detector output as an internal write pulse.\n  3. Instantiate one `sync_fifo_2x4`. Connect the mux output to FIFO `din`. Gate FIFO `wr_en` with the rising-edge detector output and `!full`, so the edge detector has a real data/control path to the top outputs through the FIFO. Generate a periodic `rd_en` only when the FIFO is not empty.\n  4. Register top `dout` from FIFO `dout`. Register top `valid` as active-high when FIFO `empty` is low.\n  5. Register top `stage` as a 2-bit counter that cycles 0→1→2→3→0 on consecutive rising clock edges while `rst_n` is high.\n  6. Async active-low reset must set `dout=0`, `valid=0`, `stage=0`, and reset the internal counters/toggles.\n\nSpecReg parsing/generation requirements:\n- The SpecReg must preserve the exact top module name and the exact six top-level ports.\n- The SpecReg must represent exactly three module nodes with module names `mux_4to1`, `rising_edge_detector`, and `sync_fifo_2x4`; each must be marked for an RTL file with the exact file name above.\n- The SpecReg graph must include a path from TOP input `din` through `mux_4to1` into `sync_fifo_2x4`, a path from `rising_edge_detector` into FIFO `wr_en`, and a path from `sync_fifo_2x4` to TOP outputs `dout` and `valid`. No required submodule may be graph-isolated.\n\nThis exercise tests the model's ability to parse a detailed hierarchical spec, preserve exact module/file/port contracts, generate multiple interconnected Verilog-2001 modules, wire port-to-port connections consistently, and maintain synthesizable non-SystemVerilog RTL.",
+  "expected_user_spec_checks": {
+    "required_fields": {
+      "top_module": "staged_mux_fifo_top"
+    },
+    "min_refined_requirements": 6,
+    "max_single_requirement_chars": 1200,
+    "required_refined_requirement_keyword_groups": [
+      [
+        "mux_4to1",
+        "mux_4to1.v"
+      ],
+      [
+        "rising_edge_detector",
+        "rising_edge_detector.v"
+      ],
+      [
+        "sync_fifo_2x4",
+        "sync_fifo_2x4.v"
+      ],
+      [
+        "exactly",
+        [
+          "six",
+          "6"
+        ],
+        "top-level",
+        "ports"
+      ],
+      [
+        "edge",
+        "detector",
+        "wr_en"
+      ],
+      [
+        "fifo",
+        "dout",
+        "valid"
+      ],
+      [
+        "stage",
+        "0",
+        "1",
+        "2",
+        "3"
+      ],
+      [
+        "Verilog-2001"
+      ]
+    ]
+  },
+  "expected_spec_checks": {
+    "exact_top_ports": true,
+    "required_top_ports": [
+      {
+        "name": "clk",
+        "direction": "input",
+        "net_type": "wire",
+        "width": "1",
+        "is_clock": true,
+        "is_reset": false
+      },
+      {
+        "name": "rst_n",
+        "direction": "input",
+        "net_type": "wire",
+        "width": "1",
+        "is_clock": false,
+        "is_reset": true
+      },
+      {
+        "name": "din",
+        "direction": "input",
+        "net_type": "wire",
+        "width": "4",
+        "is_clock": false,
+        "is_reset": false
+      },
+      {
+        "name": "dout",
+        "direction": "output",
+        "net_type": "reg",
+        "width": "4",
+        "is_clock": false,
+        "is_reset": false
+      },
+      {
+        "name": "valid",
+        "direction": "output",
+        "net_type": "reg",
+        "width": "1",
+        "is_clock": false,
+        "is_reset": false
+      },
+      {
+        "name": "stage",
+        "direction": "output",
+        "net_type": "reg",
+        "width": "2",
+        "is_clock": false,
+        "is_reset": false
+      }
+    ],
+    "required_clock_resets": [
+      {
+        "clock_name": "clk",
+        "reset_name": "rst_n",
+        "reset_type": "async_low"
+      }
+    ],
+    "expected_module_node_count": 3,
+    "exact_module_names": [
+      "mux_4to1",
+      "rising_edge_detector",
+      "sync_fifo_2x4"
+    ],
+    "required_module_nodes": [
+      {
+        "module_name": "mux_4to1",
+        "file_name": "mux_4to1.v",
+        "is_rtl_file": true,
+        "parent_node_id": "TOP"
+      },
+      {
+        "module_name": "rising_edge_detector",
+        "file_name": "rising_edge_detector.v",
+        "is_rtl_file": true,
+        "parent_node_id": "TOP"
+      },
+      {
+        "module_name": "sync_fifo_2x4",
+        "file_name": "sync_fifo_2x4.v",
+        "is_rtl_file": true,
+        "parent_node_id": "TOP"
+      }
+    ],
+    "required_text_keyword_groups": {
+      "functional_requirements": [
+        [
+          "edge",
+          [
+            "wr_en",
+            "write enable"
+          ]
+        ],
+        [
+          "valid",
+          "empty"
+        ],
+        [
+          "stage",
+          "0",
+          "1",
+          "2",
+          "3"
+        ]
+      ],
+      "verification_directives": [
+        [
+          [
+            "iverilog",
+            "compile",
+            "connectivity"
+          ]
+        ],
+        [
+          [
+            "fifo",
+            "submodule"
+          ]
+        ]
+      ]
+    },
+    "required_graph_paths": [
+      {
+        "source_module": "TOP",
+        "target_module": "mux_4to1",
+        "source_port": "din"
+      },
+      {
+        "source_module": "mux_4to1",
+        "target_module": "sync_fifo_2x4",
+        "target_port": "din"
+      },
+      {
+        "source_module": "rising_edge_detector",
+        "target_module": "sync_fifo_2x4",
+        "target_port": "wr_en"
+      },
+      {
+        "source_module": "sync_fifo_2x4",
+        "target_module": "TOP",
+        "target_port": "dout"
+      },
+      {
+        "source_module": "sync_fifo_2x4",
+        "target_module": "TOP",
+        "target_port": "valid"
+      }
+    ]
+  },
+  "expected_rtl_checks": {
+    "required_files": [
+      "staged_mux_fifo_top.v",
+      "mux_4to1.v",
+      "rising_edge_detector.v",
+      "sync_fifo_2x4.v"
+    ],
+    "required_module_declarations": [
+      "staged_mux_fifo_top",
+      "mux_4to1",
+      "rising_edge_detector",
+      "sync_fifo_2x4"
+    ],
+    "required_top_instantiations": [
+      "mux_4to1",
+      "rising_edge_detector",
+      "sync_fifo_2x4"
+    ],
+    "forbidden_tokens": [
+      "logic",
+      "always_ff",
+      "always_comb",
+      "typedef",
+      "interface",
+      "enum",
+      "unique",
+      "priority",
+      "bit",
+      "byte",
+      "int"
+    ],
+    "exact_module_ports": false,
+    "required_module_ports": {
+      "staged_mux_fifo_top": [
+        "clk",
+        "rst_n",
+        "din",
+        "dout",
+        "valid",
+        "stage"
+      ],
+      "mux_4to1": [
+        "a",
+        "b",
+        "c",
+        "d",
+        "sel",
+        "y"
+      ],
+      "rising_edge_detector": [
+        "clk",
+        "rst_n",
+        "in",
+        "out"
+      ],
+      "sync_fifo_2x4": [
+        "clk",
+        "rst_n",
+        "wr_en",
+        "rd_en",
+        "din",
+        "full",
+        "empty",
+        "dout",
+        "count"
+      ]
+    },
+    "required_file_keyword_groups": {
+      "staged_mux_fifo_top.v": [
+        [
+          "always",
+          "posedge",
+          "rst_n"
+        ],
+        [
+          "stage",
+          "<="
+        ],
+        [
+          "valid",
+          "<="
+        ],
+        [
+          "dout",
+          "<="
+        ]
+      ]
+    }
+  }
+}

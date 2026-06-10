@@ -1,0 +1,9 @@
+{
+  "case_id": "C03_sync_fifo_4x8_detailed_nl",
+  "top_module": "sync_fifo_4x8",
+  "prompt_type": "detailed_nl",
+  "category": "fifo_storage_control",
+  "difficulty": "L4",
+  "max_iterations": 3,
+  "raw_input_text": "Generate a synthesizable Verilog-2001 RTL module named sync_fifo_4x8.\n\nThe module is a single-clock synchronous FIFO with depth 4 and data width 8.\n\nPorts:\n- input  wire       clk\n- input  wire       rst_n\n- input  wire       wr_en\n- input  wire       rd_en\n- input  wire [7:0] din\n- output reg  [7:0] dout\n- output wire       full\n- output wire       empty\n- output reg  [2:0] count\n\nBehavior:\n1. rst_n is asynchronous active-low reset.\n2. On reset, clear all storage state, set dout to 8'h00, set count to 0, empty=1, full=0.\n3. The FIFO has exactly 4 entries. count ranges from 0 to 4.\n4. A write is accepted when wr_en=1 and full=0.\n5. A read is accepted when rd_en=1 and empty=0.\n6. If write and read are both accepted in the same cycle, count stays the same.\n7. If only write is accepted, count increments by 1.\n8. If only read is accepted, count decrements by 1.\n9. On read acceptance, dout updates to the oldest stored data.\n10. On write acceptance, din is pushed to the newest position.\n11. If rd_en=1 while empty=1, do not change pointers or count.\n12. If wr_en=1 while full=1, do not overwrite storage or change pointers/count, unless a read is accepted in the same cycle and space is made available.\n13. Use synthesizable Verilog-2001 only. Avoid inferred latches and multiple drivers."
+}

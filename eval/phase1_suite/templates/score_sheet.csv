@@ -1,0 +1,1 @@
+case_id,profile,model,reasoning_effort,max_iterations,task_id,verify_verdict,workflow_success,architect_repair_frame_count,user_spec_check_pass,spec_check_pass,rtl_check_pass,strict_static_check_pass,tb_pass,spec_score,rtl_score,behavior_score,assumption_score,trace_score,total_score,notes

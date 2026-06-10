@@ -57,9 +57,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
-    title="ICU-MUJICA Verify Service",
+    title="ICU-MUJICA Evaluate Service",
     version="0.1.0",
-    description="内部验证服务，负责对生成的 SpecReg 与 RTL 执行最小闭环验证。",
+    description="内部评估服务，负责对生成的 SpecReg 与 RTL 执行最小闭环评估。",
 )
 
 
@@ -72,9 +72,9 @@ async def health_check() -> ApiResponse[HealthStatus]:
     """
     return ApiResponse(
         status="success",
-        message="verify service is ready",
+        message="evaluate service is ready",
         data=HealthStatus(
-            service="verify",
+            service="evaluate",
             state="ready",
             detail="internal service endpoint is available",
         ),
@@ -90,17 +90,17 @@ async def root() -> ApiResponse[HealthStatus]:
     """
     return ApiResponse(
         status="success",
-        message="verify service is online",
+        message="evaluate service is online",
         data=HealthStatus(
-            service="verify",
+            service="evaluate",
             state="ready",
             detail="intended for internal container calls",
         ),
     )
 
 
-@app.post("/v1/verify", response_model=ApiResponse[VerifyNodeOutput])
-async def stateless_verify(payload: VerifyTaskPayload, request: Request) -> ApiResponse[VerifyNodeOutput]:
+@app.post("/v1/evaluate", response_model=ApiResponse[VerifyNodeOutput])
+async def stateless_evaluate(payload: VerifyTaskPayload, request: Request) -> ApiResponse[VerifyNodeOutput]:
     """
     验证服务主入口。
 
@@ -141,7 +141,7 @@ async def stateless_verify(payload: VerifyTaskPayload, request: Request) -> ApiR
 
         return ApiResponse(
             status="success",
-            message="stateless verification completed via workflow",
+            message="stateless evaluation completed via workflow",
             data=verify_output,
         )
 
@@ -155,6 +155,6 @@ async def stateless_verify(payload: VerifyTaskPayload, request: Request) -> ApiR
         )
         return ApiResponse(
             status="error",
-            message=f"verify workflow failed: {exc}",
+            message=f"evaluate workflow failed: {exc}",
             data=None,
         )

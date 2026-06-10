@@ -1,4 +1,4 @@
-# docker/Dockerfile.gen
+# docker/Dockerfile.execute
 FROM python:3.11-slim-bullseye
 
 # 1. 设置基础环境与 Verible 版本变量 
@@ -30,10 +30,10 @@ RUN curl -L --fail https://github.com/chipsalliance/verible/releases/download/${
 RUN chmod -R a+rX /usr/local/lib/python3.11/site-packages
 RUN chmod -R a+rx /usr/local/bin/
 
-# 7. 拷贝生成逻辑
+# 7. 拷贝执行逻辑
 COPY ./src /ICU-MUJICA/src
 
-# 8. 启动 FastAPI 服务 (Gen 接口)
+# 8. 启动 FastAPI 服务 (Execute 接口)
 WORKDIR /ICU-MUJICA
 ENV PYTHONPATH=/ICU-MUJICA
 CMD ["uvicorn", "src.generator.main:app", "--host", "0.0.0.0", "--port", "8000"]

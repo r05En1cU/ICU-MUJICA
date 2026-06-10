@@ -333,7 +333,7 @@ def parser_initialize_node(state: WorkflowState) -> Dict[str, Any]:
     4. 将用户原始输入落盘到 Origin。
     5. 进行意图路由，构建 UserTaskSpec。
     6. 将 UserTaskSpec 同时落盘到 output 与 shared_workspace/specs。
-    7. 生成轻量任务载荷 WorkTaskPayload，供 Generator/Verify 调度使用。
+    7. 生成轻量任务载荷 WorkTaskPayload，供 Execute/Evaluate 调度使用。
     """
     request = state["request"]
     task_id = generate_global_task_id()
@@ -409,7 +409,7 @@ def parser_initialize_node(state: WorkflowState) -> Dict[str, Any]:
         encoding="utf-8",
     )
 
-    # 2) 将同一份规约同步到 SharedWorkspace/specs，供 Generator 读取。
+    # 2) 将同一份规约同步到 SharedWorkspace/specs，供 Execute 读取。
     shared_user_task_spec_path = Path(task_paths.specs_dir) / "UserTaskSpec.json"
     shared_user_task_spec_path.write_text(
         user_task_spec.model_dump_json(indent=2),
@@ -449,13 +449,13 @@ def parser_initialize_node(state: WorkflowState) -> Dict[str, Any]:
     }
 
 
-def gen_stateless_node(state: WorkflowState) -> Dict[str, Any]:
+def execute_stateless_node(state: WorkflowState) -> Dict[str, Any]:
     """
-    节点 2：无状态调用 Generator 服务。
+    节点 2：无状态调用 Execute 服务。
 
     职责：
     1. 从状态中读取 WorkTaskPayload。
-    2. 通过 HTTP 调用内部 Generator 服务。
+    2. 通过 HTTP 调用内部 Execute 服务。
     3. 接收生成结果（SpecReg 路径 + RTL 路径）。
     4. 将结果写回工作流状态。
     """
@@ -466,13 +466,13 @@ def gen_stateless_node(state: WorkflowState) -> Dict[str, Any]:
     if request is None:
         raise ValueError("workflow request is missing")
 
-    gen_base_url = os.getenv("GEN_SERVICE_URL", "http://gen:8000")
-    endpoint = f"{gen_base_url}/v1/generate"
+    gen_base_url = os.getenv("EXECUTE_SERVICE_URL", "http://execute:8000")
+    endpoint = f"{gen_base_url}/v1/execute"
 
     # 注意：这里只通过控制面传递轻量载荷，不直接传输大段 RTL 文本。
-    # 支持 LLM 生成等慢路径，超时可通过 GEN_SERVICE_TIMEOUT_SECONDS 配置，默认 420 秒
+    # 支持 LLM 生成等慢路径，超时可通过 EXECUTE_SERVICE_TIMEOUT_SECONDS 配置，默认 420 秒
     try:
-        gen_timeout = float(os.getenv("GEN_SERVICE_TIMEOUT_SECONDS", "420"))
+        gen_timeout = float(os.getenv("EXECUTE_SERVICE_TIMEOUT_SECONDS", "420"))
     except Exception:
         gen_timeout = 420.0
     with httpx.Client(timeout=gen_timeout) as client:
@@ -485,7 +485,7 @@ def gen_stateless_node(state: WorkflowState) -> Dict[str, Any]:
 
     response_payload = response.json()
     if response_payload.get("status") != "success" or response_payload.get("data") is None:
-        downstream_message = response_payload.get("message") or "generator returned empty data"
+        downstream_message = response_payload.get("message") or "execute returned empty data"
         raise ValueError(str(downstream_message))
 
     # 使用当前冻结版模型做协议校验；这里不再放宽 strict。
@@ -495,23 +495,23 @@ def gen_stateless_node(state: WorkflowState) -> Dict[str, Any]:
         "gen_output": gen_output,
         "trace": [
             WorkflowTraceStep(
-                node="gen_stateless",
+                node="execute_stateless",
                 status="success",
-                detail=str(response_payload.get("message", "generator completed")),
+                detail=str(response_payload.get("message", "execute completed")),
                 iteration=task.iteration,
             )
         ],
     }
 
 
-def verify_stateless_node(state: WorkflowState) -> Dict[str, Any]:
+def evaluate_stateless_node(state: WorkflowState) -> Dict[str, Any]:
     """
-    节点 3：无状态调用 Verify 服务。
+    节点 3：无状态调用 Evaluate 服务。
 
     职责：
-    1. 读取当前任务载荷与 Generator 输出。
-    2. 构造 VerifyTaskPayload（传路径，不传大文件内容）。
-    3. 通过 HTTP 调用内部 Verify 服务。
+    1. 读取当前任务载荷与 Execute 输出。
+    2. 构造 EvaluateTaskPayload（传路径，不传大文件内容）。
+    3. 通过 HTTP 调用内部 Evaluate 服务。
     4. 将 VerifyNodeOutput 写回工作流状态。
     """
     task = state.get("task")
@@ -523,10 +523,10 @@ def verify_stateless_node(state: WorkflowState) -> Dict[str, Any]:
     if request is None:
         raise ValueError("workflow request is missing")
     if gen_output is None:
-        raise ValueError("generator output is missing")
+        raise ValueError("execute output is missing")
 
-    verify_base_url = os.getenv("VERIFY_SERVICE_URL", "http://verify:8000")
-    endpoint = f"{verify_base_url}/v1/verify"
+    verify_base_url = os.getenv("EVALUATE_SERVICE_URL", "http://evaluate:8000")
+    endpoint = f"{verify_base_url}/v1/evaluate"
 
     verify_payload = VerifyTaskPayload(
         task=task,
@@ -536,7 +536,7 @@ def verify_stateless_node(state: WorkflowState) -> Dict[str, Any]:
     )
 
     try:
-        verify_timeout = float(os.getenv("VERIFY_SERVICE_TIMEOUT_SECONDS", "420"))
+        verify_timeout = float(os.getenv("EVALUATE_SERVICE_TIMEOUT_SECONDS", "420"))
     except Exception:
         verify_timeout = 420.0
     with httpx.Client(timeout=verify_timeout) as client:
@@ -549,7 +549,7 @@ def verify_stateless_node(state: WorkflowState) -> Dict[str, Any]:
 
     response_payload = response.json()
     if response_payload.get("status") != "success" or response_payload.get("data") is None:
-        downstream_message = response_payload.get("message") or "verify returned empty data"
+        downstream_message = response_payload.get("message") or "evaluate returned empty data"
         raise ValueError(str(downstream_message))
 
     verify_output = VerifyNodeOutput.model_validate(response_payload["data"])
@@ -558,9 +558,9 @@ def verify_stateless_node(state: WorkflowState) -> Dict[str, Any]:
         "verify_output": verify_output,
         "trace": [
             WorkflowTraceStep(
-                node="verify_stateless",
+                node="evaluate_stateless",
                 status="success",
-                detail=str(response_payload.get("message", "verify completed")),
+                detail=str(response_payload.get("message", "evaluate completed")),
                 iteration=task.iteration,
             )
         ],
@@ -605,7 +605,7 @@ def prepare_retry_node(state: WorkflowState) -> Dict[str, Any]:
     职责：
     1. 在原任务载荷上递增 iteration。
     2. 记录本轮失败的验证结论与修复建议。
-    3. 为下一次 Generator 调用保留最小必要上下文。
+    3. 为下一次 Execute 调用保留最小必要上下文。
 
     注意：
     - 当前冻结版 WorkTaskPayload 仍是轻量协议，不显式携带 VerifyRpt 路径。
@@ -615,7 +615,7 @@ def prepare_retry_node(state: WorkflowState) -> Dict[str, Any]:
     verify_output = state.get("verify_output")
 
     if task is None or verify_output is None:
-        raise ValueError("cannot prepare retry without task and verify output")
+        raise ValueError("cannot prepare retry without task and evaluate output")
 
     report = verify_output.report
     next_iteration = task.iteration + 1
@@ -728,28 +728,28 @@ def build_workflow_graph():
     工作流主路径：
     START
       -> parser_initialize
-      -> gen_stateless
-      -> verify_stateless
+      -> execute_stateless
+      -> evaluate_stateless
       -> (条件路由)
          - archive_success
-         - prepare_retry -> gen_stateless
+         - prepare_retry -> execute_stateless
          - archive_failed
       -> END
     """
     graph = StateGraph(WorkflowState)
 
     graph.add_node("parser_initialize", parser_initialize_node)
-    graph.add_node("gen_stateless", gen_stateless_node)
-    graph.add_node("verify_stateless", verify_stateless_node)
+    graph.add_node("execute_stateless", execute_stateless_node)
+    graph.add_node("evaluate_stateless", evaluate_stateless_node)
     graph.add_node("prepare_retry", prepare_retry_node)
     graph.add_node("archive_success", archive_success_node)
     graph.add_node("archive_failed", archive_failed_node)
 
     graph.add_edge(START, "parser_initialize")
-    graph.add_edge("parser_initialize", "gen_stateless")
-    graph.add_edge("gen_stateless", "verify_stateless")
+    graph.add_edge("parser_initialize", "execute_stateless")
+    graph.add_edge("execute_stateless", "evaluate_stateless")
     graph.add_conditional_edges(
-        "verify_stateless",
+        "evaluate_stateless",
         route_after_verify,
         {
             "archive_success": "archive_success",
@@ -757,7 +757,7 @@ def build_workflow_graph():
             "archive_failed": "archive_failed",
         },
     )
-    graph.add_edge("prepare_retry", "gen_stateless")
+    graph.add_edge("prepare_retry", "execute_stateless")
     graph.add_edge("archive_success", END)
     graph.add_edge("archive_failed", END)
 

@@ -142,7 +142,7 @@ class ArtifactSourceStage(str, Enum):
     PARSER = "parser"
     ARCHITECT = "architect"
     CODER = "coder"
-    VERIFY = "verify"
+    EVALUATE = "evaluate"
     WORKFLOW = "workflow"
     USER = "user"
 

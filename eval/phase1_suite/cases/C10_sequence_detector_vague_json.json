@@ -1,0 +1,9 @@
+{
+  "case_id": "C10_sequence_detector_vague_json",
+  "top_module": "seq_detector",
+  "prompt_type": "vague_json",
+  "category": "fsm_sequence_detector",
+  "difficulty": "L3",
+  "max_iterations": 3,
+  "raw_input_text": "{\n  \"module\": \"seq_detector\",\n  \"goal\": \"detect a bit pattern in a serial input stream\",\n  \"pattern\": \"1011\",\n  \"ports\": {\n    \"clk\": \"clock\",\n    \"rst_n\": \"active low reset\",\n    \"din\": \"serial input bit\",\n    \"valid\": \"input valid\",\n    \"match\": \"output pulse\"\n  },\n  \"notes\": \"overlap should probably be supported; use synthesizable Verilog-2001\"\n}"
+}

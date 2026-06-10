@@ -57,9 +57,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
-    title="ICU-MUJICA Generator Service",
+    title="ICU-MUJICA Execute Service",
     version="0.1.0",
-    description="内部生成服务，负责从结构化规约到 RTL 产物生成。",
+    description="内部执行服务，负责从结构化规约到 RTL 产物生成。",
 )
 
 
@@ -72,9 +72,9 @@ async def health_check() -> ApiResponse[HealthStatus]:
     """
     return ApiResponse(
         status="success",
-        message="generator service is ready",
+        message="execute service is ready",
         data=HealthStatus(
-            service="generator",
+            service="execute",
             state="ready",
             detail="internal service endpoint is available",
         ),
@@ -90,17 +90,17 @@ async def root() -> ApiResponse[HealthStatus]:
     """
     return ApiResponse(
         status="success",
-        message="generator service is online",
+        message="execute service is online",
         data=HealthStatus(
-            service="generator",
+            service="execute",
             state="ready",
             detail="intended for internal container calls",
         ),
     )
 
 
-@app.post("/v1/generate", response_model=ApiResponse[GenNodeOutput])
-async def stateless_generate(payload: WorkTaskPayload, request: Request) -> ApiResponse[GenNodeOutput]:
+@app.post("/v1/execute", response_model=ApiResponse[GenNodeOutput])
+async def stateless_execute(payload: WorkTaskPayload, request: Request) -> ApiResponse[GenNodeOutput]:
     """
     生成服务主入口。
 
@@ -140,7 +140,7 @@ async def stateless_generate(payload: WorkTaskPayload, request: Request) -> ApiR
 
         return ApiResponse(
             status="success",
-            message="stateless generation completed via workflow",
+            message="stateless execution completed via workflow",
             data=gen_output,
         )
 
@@ -154,6 +154,6 @@ async def stateless_generate(payload: WorkTaskPayload, request: Request) -> ApiR
         )
         return ApiResponse(
             status="error",
-            message=f"generator workflow failed: {exc}",
+            message=f"execute workflow failed: {exc}",
             data=None,
         )
