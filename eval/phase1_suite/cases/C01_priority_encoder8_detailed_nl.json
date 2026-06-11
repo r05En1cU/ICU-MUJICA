@@ -1,9 +1,0 @@
-{
-  "case_id": "C01_priority_encoder8_detailed_nl",
-  "top_module": "priority_encoder8",
-  "prompt_type": "detailed_nl",
-  "category": "combinational_priority",
-  "difficulty": "L1",
-  "max_iterations": 3,
-  "raw_input_text": "Generate a synthesizable Verilog-2001 RTL module named priority_encoder8.\n\nThe module is an 8-input fixed-priority encoder with valid and one-hot grant outputs.\n\nPorts:\n- input  wire [7:0] req\n- output reg        valid\n- output reg  [2:0] index\n- output reg  [7:0] grant\n\nBehavior:\n1. The module is purely combinational. It has no clock and no reset.\n2. req[0] has the highest priority, then req[1], ..., req[7] has the lowest priority.\n3. If req is 8'b00000000:\n   - valid = 1'b0\n   - index = 3'd0\n   - grant = 8'b00000000\n4. If one or more request bits are high:\n   - valid = 1'b1\n   - index equals the highest-priority active request index\n   - grant is one-hot with only that selected bit asserted\n5. Avoid inferred latches by assigning defaults in combinational logic.\n6. Use synthesizable Verilog-2001 only. Do not use SystemVerilog syntax."
-}

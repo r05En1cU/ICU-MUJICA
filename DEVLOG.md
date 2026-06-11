@@ -1,3 +1,8 @@
+# 2026-06-11
+
+- 新建 `eval/safety_suite/` 系统安全性测试子项,占位 `C1`–`C5` 五个空目录,每个含 `.gitkeep`;顶层 `README.md` 标注用途与后续补全项。
+- 暂未填具体用例,语义与脚本待 v1.5 守卫加固、P0 元数据、Ambiguity/DesignSheet 方向明确后再补。
+
 # 2026-05-29 v1
 
 - 完成项目文档品牌迁移：将项目描述更新为 `IC Unified - Multi-agent Unified Joint IC Automation`，明确 ICU-MUJICA 继承自 AGVS4RTL，曾作为重构分支，现转入独立开发；保留旧 README 备份 `README.md.bak`。

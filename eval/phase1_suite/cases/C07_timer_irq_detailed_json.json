@@ -1,9 +1,0 @@
-{
-  "case_id": "C07_timer_irq_detailed_json",
-  "top_module": "timer_irq",
-  "prompt_type": "detailed_json",
-  "category": "timer_interrupt",
-  "difficulty": "L3",
-  "max_iterations": 3,
-  "raw_input_text": "{\n  \"module\": \"timer_irq\",\n  \"language\": \"Verilog-2001\",\n  \"ports\": [\n    {\"name\": \"clk\", \"direction\": \"input\", \"width\": 1},\n    {\"name\": \"rst_n\", \"direction\": \"input\", \"width\": 1, \"reset\": \"async_active_low\"},\n    {\"name\": \"enable\", \"direction\": \"input\", \"width\": 1},\n    {\"name\": \"clear_irq\", \"direction\": \"input\", \"width\": 1},\n    {\"name\": \"period\", \"direction\": \"input\", \"width\": 16},\n    {\"name\": \"irq\", \"direction\": \"output\", \"type\": \"reg\", \"width\": 1},\n    {\"name\": \"count\", \"direction\": \"output\", \"type\": \"reg\", \"width\": 16}\n  ],\n  \"behavior\": {\n    \"reset\": \"count=0 and irq=0\",\n    \"mode\": \"periodic timer\",\n    \"counting\": \"when enable=1 and period!=0, count increments each cycle until count == period-1\",\n    \"irq\": \"when count == period-1, irq is set to 1 and count wraps to 0\",\n    \"clear_irq\": \"clear_irq=1 clears irq to 0 without stopping the counter\",\n    \"disabled\": \"when enable=0, count holds its value and irq can still be cleared\",\n    \"period_zero\": \"if period==0, counter holds at 0 and irq stays 0 except reset/clear behavior\"\n  },\n  \"constraints\": [\n    \"synthesizable only\",\n    \"no SystemVerilog\",\n    \"nonblocking assignments in sequential logic\",\n    \"no inferred latches\"\n  ]\n}"
-}

@@ -1,9 +1,0 @@
-{
-  "case_id": "C05_skid_buffer_vague_nl",
-  "top_module": "skid_buffer",
-  "prompt_type": "vague_nl",
-  "category": "valid_ready_buffer",
-  "difficulty": "L4",
-  "max_iterations": 3,
-  "raw_input_text": "写一个单拍 skid buffer，模块名 skid_buffer，用 valid-ready 接口，数据宽度 8bit。上游给 in_valid 和 in_data，下游给 out_ready。需要避免 ready 拉低时丢数据。带 clk 和低有效 reset。用 Verilog-2001。"
-}

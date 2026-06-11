@@ -1,9 +1,0 @@
-{
-  "case_id": "C08_uart_tx_lite_detailed_json",
-  "top_module": "uart_tx_lite",
-  "prompt_type": "detailed_json",
-  "category": "uart_fsm_shift_register",
-  "difficulty": "L4_L5",
-  "max_iterations": 3,
-  "raw_input_text": "{\n  \"module\": \"uart_tx_lite\",\n  \"language\": \"Verilog-2001\",\n  \"description\": \"Minimal UART transmitter using an external baud_tick enable.\",\n  \"ports\": [\n    {\"name\": \"clk\", \"direction\": \"input\", \"width\": 1},\n    {\"name\": \"rst_n\", \"direction\": \"input\", \"width\": 1, \"reset\": \"async_active_low\"},\n    {\"name\": \"start\", \"direction\": \"input\", \"width\": 1},\n    {\"name\": \"data\", \"direction\": \"input\", \"width\": 8},\n    {\"name\": \"baud_tick\", \"direction\": \"input\", \"width\": 1},\n    {\"name\": \"tx\", \"direction\": \"output\", \"type\": \"reg\", \"width\": 1},\n    {\"name\": \"busy\", \"direction\": \"output\", \"type\": \"reg\", \"width\": 1},\n    {\"name\": \"done\", \"direction\": \"output\", \"type\": \"reg\", \"width\": 1}\n  ],\n  \"behavior\": [\n    \"Idle line tx is 1.\",\n    \"On reset: tx=1, busy=0, done=0.\",\n    \"When start=1 in idle, latch data, assert busy, transmit one start bit 0, then 8 data bits LSB first, then one stop bit 1.\",\n    \"Advance to the next bit only when baud_tick=1.\",\n    \"Ignore start while busy=1.\",\n    \"done is a one-cycle pulse asserted after the stop bit has been transmitted.\",\n    \"When not busy, tx remains 1.\"\n  ],\n  \"constraints\": [\n    \"Use a clear FSM.\",\n    \"Use synthesizable Verilog-2001 only.\",\n    \"Do not use SystemVerilog enum.\",\n    \"Avoid inferred latches and multiple drivers.\"\n  ]\n}"
-}
