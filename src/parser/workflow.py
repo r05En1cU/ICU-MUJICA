@@ -14,6 +14,8 @@ from langgraph.graph import END, START, StateGraph
 
 from src.common.llm_safety import sanitize_llm_message, strip_visible_cot
 from src.common.models import (
+    ErrorSnapshot,
+    FailureRecord,
     GenNodeOutput,
     IntentCategory,
     LlmRuntimeConfig,
@@ -22,6 +24,7 @@ from src.common.models import (
     UserTaskSpec,
     VerifyNodeOutput,
     VerifyTaskPayload,
+    VerifyVerdict,
     WorkTaskPayload,
     WorkflowRunRequest,
     WorkflowRunResult,
@@ -475,33 +478,41 @@ def execute_stateless_node(state: WorkflowState) -> Dict[str, Any]:
         gen_timeout = float(os.getenv("EXECUTE_SERVICE_TIMEOUT_SECONDS", "420"))
     except Exception:
         gen_timeout = 420.0
-    with httpx.Client(timeout=gen_timeout) as client:
-        response = client.post(
-            endpoint,
-            json=task.model_dump(mode="json"),
-            headers=_build_llm_forward_headers(request),
-        )
-        response.raise_for_status()
-
-    response_payload = response.json()
-    if response_payload.get("status") != "success" or response_payload.get("data") is None:
-        downstream_message = response_payload.get("message") or "execute returned empty data"
-        raise ValueError(str(downstream_message))
-
-    # 使用当前冻结版模型做协议校验；这里不再放宽 strict。
-    gen_output = GenNodeOutput.model_validate(response_payload["data"])
-
-    return {
-        "gen_output": gen_output,
-        "trace": [
-            WorkflowTraceStep(
-                node="execute_stateless",
-                status="success",
-                detail=str(response_payload.get("message", "execute completed")),
-                iteration=task.iteration,
+    try:
+        with httpx.Client(timeout=gen_timeout, transport=httpx.HTTPTransport(retries=2)) as client:
+            response = client.post(
+                endpoint,
+                json=task.model_dump(mode="json"),
+                headers=_build_llm_forward_headers(request),
             )
-        ],
-    }
+            response.raise_for_status()
+
+        response_payload = response.json()
+        if response_payload.get("status") != "success" or response_payload.get("data") is None:
+            downstream_message = response_payload.get("message") or "execute returned empty data"
+            raise ValueError(str(downstream_message))
+
+        gen_output = GenNodeOutput.model_validate(response_payload["data"])
+        return {
+            "gen_output": gen_output,
+            "error": None,
+            "trace": [
+                WorkflowTraceStep(
+                    node="execute_stateless",
+                    status="success",
+                    detail=str(response_payload.get("message", "execute completed")),
+                    iteration=task.iteration,
+                )
+            ],
+        }
+    except Exception as exc:  # noqa: BLE001
+        error = str(exc)
+        return {
+            "error": error,
+            "trace": [
+                WorkflowTraceStep(node="execute_stateless", status="error", detail=error, iteration=task.iteration)
+            ],
+        }
 
 
 def evaluate_stateless_node(state: WorkflowState) -> Dict[str, Any]:
@@ -523,7 +534,13 @@ def evaluate_stateless_node(state: WorkflowState) -> Dict[str, Any]:
     if request is None:
         raise ValueError("workflow request is missing")
     if gen_output is None:
-        raise ValueError("execute output is missing")
+        detail = str(state.get("error") or "execute output is missing")
+        return {
+            "error": detail,
+            "trace": [
+                WorkflowTraceStep(node="evaluate_stateless", status="error", detail=detail, iteration=task.iteration)
+            ],
+        }
 
     verify_base_url = os.getenv("EVALUATE_SERVICE_URL", "http://evaluate:8000")
     endpoint = f"{verify_base_url}/v1/evaluate"
@@ -539,32 +556,158 @@ def evaluate_stateless_node(state: WorkflowState) -> Dict[str, Any]:
         verify_timeout = float(os.getenv("EVALUATE_SERVICE_TIMEOUT_SECONDS", "420"))
     except Exception:
         verify_timeout = 420.0
-    with httpx.Client(timeout=verify_timeout) as client:
-        response = client.post(
-            endpoint,
-            json=verify_payload.model_dump(mode="json"),
-            headers=_build_llm_forward_headers(request),
-        )
-        response.raise_for_status()
-
-    response_payload = response.json()
-    if response_payload.get("status") != "success" or response_payload.get("data") is None:
-        downstream_message = response_payload.get("message") or "evaluate returned empty data"
-        raise ValueError(str(downstream_message))
-
-    verify_output = VerifyNodeOutput.model_validate(response_payload["data"])
-
-    return {
-        "verify_output": verify_output,
-        "trace": [
-            WorkflowTraceStep(
-                node="evaluate_stateless",
-                status="success",
-                detail=str(response_payload.get("message", "evaluate completed")),
-                iteration=task.iteration,
+    try:
+        with httpx.Client(timeout=verify_timeout, transport=httpx.HTTPTransport(retries=2)) as client:
+            response = client.post(
+                endpoint,
+                json=verify_payload.model_dump(mode="json"),
+                headers=_build_llm_forward_headers(request),
             )
-        ],
+            response.raise_for_status()
+
+        response_payload = response.json()
+        if response_payload.get("status") != "success" or response_payload.get("data") is None:
+            downstream_message = response_payload.get("message") or "evaluate returned empty data"
+            raise ValueError(str(downstream_message))
+
+        verify_output = VerifyNodeOutput.model_validate(response_payload["data"])
+        return {
+            "verify_output": verify_output,
+            "error": None,
+            "trace": [
+                WorkflowTraceStep(
+                    node="evaluate_stateless",
+                    status="success",
+                    detail=str(response_payload.get("message", "evaluate completed")),
+                    iteration=task.iteration,
+                )
+            ],
+        }
+    except Exception as exc:  # noqa: BLE001
+        error = str(exc)
+        return {
+            "error": error,
+            "trace": [
+                WorkflowTraceStep(node="evaluate_stateless", status="error", detail=error, iteration=task.iteration)
+            ],
+        }
+
+
+def _walk_dicts(value: Any):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _walk_dicts(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_dicts(child)
+
+
+def _first_int(*values: Any) -> Optional[int]:
+    for value in values:
+        if isinstance(value, bool) or value is None:
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _first_float(*values: Any) -> Optional[float]:
+    for value in values:
+        if isinstance(value, bool) or value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _failure_record_metrics(state: WorkflowState, task: WorkTaskPayload) -> Dict[str, Any]:
+    metrics = {
+        "token_count": state.get("token_count"),
+        "model_name_version": state.get("model_name_version"),
+        "context_length": state.get("context_length"),
+        "node_latency_ms": state.get("node_latency_ms"),
     }
+    request = state.get("request")
+    if metrics["model_name_version"] is None and request is not None:
+        metrics["model_name_version"] = _resolve_llm_config(request).model
+
+    token_count = 0
+    context_length = 0
+    node_latency_ms = metrics["node_latency_ms"]
+    found_usage = False
+    llm_dir = Path(task.shared_task_dir) / "llm"
+    for transcript_path in sorted(llm_dir.glob("*.json")) if llm_dir.exists() else []:
+        try:
+            transcript_payload = json.loads(transcript_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for item in _walk_dicts(transcript_payload):
+            model_name = item.get("model") or item.get("model_name") or item.get("model_name_version")
+            if metrics["model_name_version"] is None and isinstance(model_name, str) and model_name.strip():
+                metrics["model_name_version"] = model_name
+            usage = item.get("usage")
+            if isinstance(usage, dict):
+                total = _first_int(
+                    usage.get("total_tokens"),
+                    usage.get("total_token_count"),
+                    usage.get("tokens"),
+                )
+                if total is None:
+                    prompt = _first_int(usage.get("prompt_tokens"), usage.get("input_tokens")) or 0
+                    completion = _first_int(usage.get("completion_tokens"), usage.get("output_tokens")) or 0
+                    total = prompt + completion if prompt or completion else None
+                if total is not None:
+                    found_usage = True
+                    token_count += total
+                prompt_tokens = _first_int(usage.get("prompt_tokens"), usage.get("input_tokens"), usage.get("context_length"))
+                if prompt_tokens is not None:
+                    context_length += prompt_tokens
+                if node_latency_ms is None:
+                    node_latency_ms = _first_float(usage.get("node_latency_ms"), usage.get("latency_ms"))
+            if node_latency_ms is None:
+                node_latency_ms = _first_float(item.get("node_latency_ms"), item.get("latency_ms"))
+
+    if metrics["token_count"] is None and found_usage:
+        metrics["token_count"] = token_count
+    if metrics["context_length"] is None and context_length:
+        metrics["context_length"] = context_length
+    metrics["node_latency_ms"] = node_latency_ms
+    return metrics
+
+
+def _append_failure_record(state: WorkflowState) -> None:
+    task = state.get("task")
+    verify_output = state.get("verify_output")
+    error = state.get("error")
+    if task is None or (verify_output is None and not error):
+        return
+
+    if verify_output is not None:
+        report = verify_output.report
+        verdict = report.verdict
+        error_details = report.error_details
+    else:
+        verdict = VerifyVerdict.INFRA_ERROR
+        error_details = ErrorSnapshot(infra_errors=[str(error)])
+
+    record = FailureRecord(
+        task_id=task.task_id,
+        iteration=task.iteration,
+        verdict=verdict,
+        error_details=error_details,
+        intent=task.intent,
+        top_module=task.top_module,
+        **_failure_record_metrics(state, task),
+    )
+    failure_record_path = Path(task.shared_task_dir) / "FailureRecord.jsonl"
+    failure_record_path.parent.mkdir(parents=True, exist_ok=True)
+    with failure_record_path.open("a", encoding="utf-8") as fp:
+        fp.write(record.model_dump_json() + "\n")
 
 
 def route_after_verify(
@@ -584,6 +727,8 @@ def route_after_verify(
     task = state.get("task")
     verify_output = state.get("verify_output")
 
+    if state.get("error"):
+        return "archive_failed"
     if task is None or verify_output is None:
         return "archive_failed"
 
@@ -618,8 +763,14 @@ def prepare_retry_node(state: WorkflowState) -> Dict[str, Any]:
         raise ValueError("cannot prepare retry without task and evaluate output")
 
     report = verify_output.report
+    _append_failure_record(state)
     next_iteration = task.iteration + 1
-    task.iteration = next_iteration
+    next_task = task.model_copy(
+        update={
+            "iteration": next_iteration,
+            "verify_report_path": str(Path(task.shared_task_dir) / "sim" / f"VerifyRpt_iter{task.iteration}.json"),
+        }
+    )
 
     detail = (
         f"prepare retry iteration={next_iteration}, "
@@ -629,7 +780,7 @@ def prepare_retry_node(state: WorkflowState) -> Dict[str, Any]:
     )
 
     return {
-        "task": task,
+        "task": next_task,
         "trace": [
             WorkflowTraceStep(
                 node="prepare_retry",
@@ -699,6 +850,8 @@ def archive_failed_node(state: WorkflowState) -> Dict[str, Any]:
 
     if target.exists():
         shutil.rmtree(target)
+
+    _append_failure_record(state)
 
     if source.exists():
         shutil.copytree(source, target)

@@ -906,6 +906,7 @@ class WorkTaskPayload(StrictBaseModel):
     top_module: str = Field(..., description="目标顶层模块")
     spec_file_path: str = Field(..., description="UserTaskSpec 文件绝对路径")
     shared_task_dir: str = Field(..., description="共享工作区任务目录绝对路径")
+    verify_report_path: Optional[str] = Field(default=None, description="上一轮 VerifyRpt 文件绝对路径")
 
     @field_validator("task_id", "spec_file_path", "shared_task_dir")
     @classmethod
@@ -990,6 +991,34 @@ class VerifyNodeOutput(StrictBaseModel):
     @classmethod
     def validate_summary(cls, v: str) -> str:
         return _validate_non_empty_str(v, "VerifyNodeOutput.summary")
+
+
+class FailureRecord(StrictBaseModel):
+    task_id: str = Field(..., description="失败任务 ID")
+    iteration: int = Field(..., ge=0, description="失败发生的迭代轮次")
+    verdict: VerifyVerdict = Field(..., description="失败判决")
+    error_details: ErrorSnapshot = Field(..., description="失败详情")
+    intent: IntentCategory = Field(..., description="任务意图")
+    top_module: str = Field(..., description="目标顶层模块")
+    token_count: Optional[int] = Field(default=None, ge=0, description="关联 LLM transcript 的 token 数")
+    model_name_version: Optional[str] = Field(default=None, description="关联模型名或版本")
+    context_length: Optional[int] = Field(default=None, ge=0, description="关联上下文 token 长度")
+    node_latency_ms: Optional[float] = Field(default=None, ge=0.0, description="节点耗时，毫秒")
+
+    @field_validator("task_id")
+    @classmethod
+    def validate_task_id(cls, v: str) -> str:
+        return _validate_non_empty_str(v, "FailureRecord.task_id")
+
+    @field_validator("top_module")
+    @classmethod
+    def validate_top_module(cls, v: str) -> str:
+        return _validate_identifier(v, "FailureRecord.top_module")
+
+    @field_validator("model_name_version")
+    @classmethod
+    def validate_model_name_version(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_optional_non_empty_str(v, "FailureRecord.model_name_version")
 
 
 class WorkflowTraceStep(StrictBaseModel):

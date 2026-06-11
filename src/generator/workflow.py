@@ -101,7 +101,7 @@ def _load_previous_spec_reg(shared_task_dir: Path, previous_iteration: int) -> O
     return SpecReg.model_validate_json(prev_spec_path.read_text(encoding="utf-8"))
 
 
-def _load_previous_verify_rpt(shared_task_dir: Path, previous_iteration: int) -> Optional[VerifyRpt]:
+def _load_previous_verify_rpt(task: WorkTaskPayload, shared_task_dir: Path, previous_iteration: int) -> Optional[VerifyRpt]:
     """
     尝试加载上一轮 VerifyRpt。
 
@@ -112,8 +112,10 @@ def _load_previous_verify_rpt(shared_task_dir: Path, previous_iteration: int) ->
     - 该文件是否存在，取决于 Verify 服务以及 Parser 编排器是否按约定落盘。
     - 若文件缺失，Generator 应保持可运行，不直接失败。
     """
-    verify_rpt_path = shared_task_dir / "sim" / f"VerifyRpt_iter{previous_iteration}.json"
+    verify_rpt_path = Path(task.verify_report_path) if getattr(task, "verify_report_path", None) else (shared_task_dir / "sim" / f"VerifyRpt_iter{previous_iteration}.json")
     if not verify_rpt_path.exists():
+        if getattr(task, "verify_report_path", None):
+            raise FileNotFoundError(f"VerifyRpt missing before retry: {verify_rpt_path}")
         return None
 
     return VerifyRpt.model_validate_json(verify_rpt_path.read_text(encoding="utf-8"))
@@ -1826,7 +1828,7 @@ def init_context_node(state: GenWorkflowState) -> Dict[str, Any]:
     if task.is_retry_iteration():
         previous_iteration = task.iteration - 1
         previous_spec_reg = _load_previous_spec_reg(shared_task_dir, previous_iteration)
-        verify_rpt = _load_previous_verify_rpt(shared_task_dir, previous_iteration)
+        verify_rpt = _load_previous_verify_rpt(task, shared_task_dir, previous_iteration)
 
     messages = _build_system_messages(
         task=task,

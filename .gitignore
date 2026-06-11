@@ -10,3 +10,6 @@ output/*
 !output/.gitignore
 shared_workspace/*
 !shared_workspace/.gitignore
+experiments
+tests
+ICU-MUJICA.code-workspace
