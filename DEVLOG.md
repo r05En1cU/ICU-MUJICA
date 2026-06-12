@@ -1,5 +1,7 @@
 # 2026-06-11
 
+- 对齐 CVDP v1.1.0 非商业 code-generation 评测口径：常规完整集为 394 个问题（non-agentic 302、agentic 92），本地 example no_commercial 文件仅为 1 题 smoke；最小可报告 PassRate 的运行口径为至少 1 个 datapoint、`--n-samples 1 --k-threshold 1`，context-heavy agentic 100 题作为额外集单独记录。
+
 - 补入本地健壮性测试目录 `tests/`,新增针对 Parser/Execute/Evaluate 异常路由、retry 上下文、FailureRecord 记录与归档清理逻辑的稳健性检查。
 - 暂未填 `eval/safety_suite/` 的具体用例,语义与脚本待 v1.5 守卫加固、P0 元数据、Ambiguity/DesignSheet 方向明确后再补。
 
