@@ -1,7 +1,7 @@
 # 2026-06-11
 
-- 新建 `eval/safety_suite/` 系统安全性测试子项,占位 `C1`–`C5` 五个空目录,每个含 `.gitkeep`;顶层 `README.md` 标注用途与后续补全项。
-- 暂未填具体用例,语义与脚本待 v1.5 守卫加固、P0 元数据、Ambiguity/DesignSheet 方向明确后再补。
+- 补入本地健壮性测试目录 `tests/`,新增针对 Parser/Execute/Evaluate 异常路由、retry 上下文、FailureRecord 记录与归档清理逻辑的稳健性检查。
+- 暂未填 `eval/safety_suite/` 的具体用例,语义与脚本待 v1.5 守卫加固、P0 元数据、Ambiguity/DesignSheet 方向明确后再补。
 
 # 2026-05-29 v1
 
